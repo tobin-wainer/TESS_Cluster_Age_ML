@@ -3,3 +3,6 @@ Repo for the working Directory of ML techniques to predict Star cluster ages fro
 
 
 Light Curve summary statistics for data augmented light curves are available in the data folder. Trying to get the actual light curve fits files in the light_curves folder
+
+
+Jupyter Notebooks are in the home directory. Paths will need to be updated
