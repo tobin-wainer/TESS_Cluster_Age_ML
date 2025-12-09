@@ -1,0 +1,7 @@
+*.pkl
+*.pt
+*.fits
+.ipynb_checkpoints/
+GaussianNN_CGW/Model_Pipeline/TempFiles/
+__pycache__/
+
