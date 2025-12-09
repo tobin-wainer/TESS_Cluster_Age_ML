@@ -2,6 +2,7 @@
 Training Helper Functions
 
 Contains core training loop functions for the Gaussian Neural Network:
+- Preprocessing (apply_preprocessing)
 - Loss function (GaussianNLLLoss_ME)
 - Batch processing (Run_Single_Batch)
 - Epoch processing (Run_Single_Epoch)
@@ -25,6 +26,77 @@ from itertools import cycle
 
 # Import evaluation metrics from DataAnalysis_HelperFcns
 from DataAnalysis_HelperFcns import mae, rmse, coverage, crps_gaussian, Loss_Components
+
+
+# ==============================================================================
+# Preprocessing Functions
+# ==============================================================================
+
+def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val):
+    """
+    Apply preprocessing (scaling, normalization) to training and validation data.
+
+    Fit transformations on training data only, then apply to both train and val.
+    This function ensures no data leakage by fitting scalers only on training data.
+
+    Parameters:
+    -----------
+    X_train, X_val : torch.Tensor
+        Summary statistics (N, 17) - raw, unscaled
+    period_train, period_val : torch.Tensor or None
+        Periodogram data (N, 1089) - raw, unnormalized
+    y_train, y_val : torch.Tensor
+        Target ages - raw, not de-meaned
+
+    Returns:
+    --------
+    X_train_scaled, X_val_scaled : torch.Tensor
+        Scaled summary statistics
+    period_train_norm, period_val_norm : torch.Tensor or None
+        Normalized periodograms
+    y_train_demeaned, y_val_demeaned : torch.Tensor
+        De-meaned targets
+    scaler : StandardScaler
+        Fitted scaler object
+    y_mean : float
+        Mean of training targets
+    mean_peak_strength : float or None
+        Mean peak strength for periodogram normalization (None if no periodogram)
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    # 1. De-mean targets using training mean
+    y_mean = y_train.mean().item()
+    y_train_demeaned = y_train - y_mean
+    y_val_demeaned = y_val - y_mean
+
+    # 2. Scale summary statistics
+    scaler = StandardScaler()
+    X_train_scaled = torch.tensor(
+        scaler.fit_transform(X_train.cpu().numpy()),
+        dtype=torch.float32
+    )
+    X_val_scaled = torch.tensor(
+        scaler.transform(X_val.cpu().numpy()),
+        dtype=torch.float32
+    )
+
+    # 3. Normalize periodograms (if provided)
+    if period_train is not None:
+        periodograms = period_train.cpu().numpy()
+        mean_peak_strength = np.max(periodograms, axis=1).mean()
+
+        period_train_norm = period_train / mean_peak_strength
+        period_val_norm = period_val / mean_peak_strength
+    else:
+        period_train_norm = None
+        period_val_norm = None
+        mean_peak_strength = None
+
+    return (X_train_scaled, X_val_scaled,
+            period_train_norm, period_val_norm,
+            y_train_demeaned, y_val_demeaned,
+            scaler, y_mean, mean_peak_strength)
 
 
 # ==============================================================================
