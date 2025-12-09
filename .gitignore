@@ -3,6 +3,7 @@
 *.fits
 *.png  
 .ipynb_checkpoints/
+*.ipynb_checkpoints*
 GaussianNN_CGW/Model_Pipeline/TempFiles/
 __pycache__/
 
