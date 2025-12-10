@@ -33,13 +33,13 @@ def normalize_to_kfold(all_runs_log):
     return wrapped
 
 
-def plot_trainval_loss_evolution(all_runs_log, all_models_same_plot=False):
+def plot_trainval_loss_evolution(all_runs_log, all_models_same_plot=False, is_kfold=True):
     # Function outptus the Training Loss, TrainingLoss Components, and Validation Loss for each model run per epoch.
     # If all_models_same_plot=True, then all models and all kfolds are plotted on the same plot.
     # If all_models_same_plot=True, then each model on a seperate plot, but all kfolds still on same plot.
     
     # Case 1: k-fold results (model_name → runs)
-    is_kfold = any(isinstance(v, dict) and "params" in v for v in all_runs_log.values())
+    # is_kfold = any(isinstance(v, dict) and "params" in v for v in all_runs_log.values())
 
     if is_kfold:
         # ============================================================
@@ -303,6 +303,9 @@ def plot_all_metric_evolution(all_runs_log,
                 color = next(color_cycle)
                 label = get_param_label(all_param_dicts, params)
 
+                # Extract best_model_epoch if available (for non-k-fold runs)
+                best_model_epoch = run_data.get('best_model_epoch', None)
+
     
                 n_epochs = params['n_epochs']
                 n_kfolds = params['num_kfolds']
@@ -328,6 +331,11 @@ def plot_all_metric_evolution(all_runs_log,
                     #y_upper = np.max(temporary_array, axis=0); y_lower = np.min(temporary_array, axis=0)
     
                     axs[metric_id].plot(x, y, color=color, label=label)
+
+                    # Add vertical line at best model epoch (only for non-k-fold runs)
+                    if not k_fold and best_model_epoch is not None:
+                        axs[metric_id].axvline(x=best_model_epoch, color='red', linestyle='--',
+                                              linewidth=2, alpha=0.7, zorder=5)
 
                     if use_minmax_spread:
                         # --- MIN–MAX spread as dashed lines ---
@@ -410,7 +418,7 @@ def plot_all_metric_evolution(all_runs_log,
                         epoch_of_best_metric = np.argmin(np.median(temporary_array, axis=0))
                     
                     print(f'      {metric} = {best_metric:2f}; epoch = {epoch_of_best_metric}')
-    
+
         plt.tight_layout()
 
         # --- Make a single combined legend at bottom ---

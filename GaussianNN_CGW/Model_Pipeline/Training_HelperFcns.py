@@ -17,6 +17,7 @@ import torch.optim as optim
 import numpy as np
 import time
 import warnings
+import copy
 from torch.utils.data import TensorDataset, DataLoader
 
 import matplotlib.pyplot as plt
@@ -241,15 +242,42 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
 # Full Training Loop
 # ==============================================================================
 
-def Train_Model(model, training_data, validation_data, params, log):
+def Train_Model(model, training_data, validation_data, params, log, save_best_checkpoint=False):
+    """
+    Train a model with optional best checkpoint saving.
+
+    Parameters:
+    -----------
+    model : nn.Module
+        The model to train
+    training_data : tuple
+        (X_train, Period_train, y_train)
+    validation_data : tuple
+        (X_valid, Period_valid, y_valid)
+    params : dict
+        Training parameters
+    log : dict
+        Training log dictionary
+    save_best_checkpoint : bool, optional
+        If True, tracks and returns best model checkpoint based on smoothed validation loss.
+        If False, only returns final model (backward compatible).
+        Default: False
+
+    Returns:
+    --------
+    If save_best_checkpoint=False (default):
+        model, log, train_loss
+    If save_best_checkpoint=True:
+        model, log, train_loss, best_model_state, best_epoch
+    """
     X_train, Period_train, y_train = training_data
     X_valid, Period_valid, y_valid = validation_data
 
     learning_rate = params['lr']
     batch_size = int(params['batch_size'])
     n_epochs = int(params['n_epochs'])
-    loss_factor = int(params['artificial_loss_weight_factor'])
-    weight_decay = int(params['weight_decay'])
+    loss_factor = float(params['artificial_loss_weight_factor'])  # FIXED: was int, now float
+    weight_decay = float(params['weight_decay'])  # FIXED: was int (converted 1e-06 to 0), now float
     use_periodogram = Period_train is not None
 
     if use_periodogram:
@@ -263,6 +291,14 @@ def Train_Model(model, training_data, validation_data, params, log):
     # Define Loss Fcn and Optimizer
     loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    # Best model tracking (only if requested)
+    if save_best_checkpoint:
+        best_model_state = None
+        best_epoch = 0
+        best_smoothed_loss = float('inf')
+        smoothing_window = 3  # Smooth over 3 epochs
+        recent_val_losses = []  # Store recent validation losses for smoothing
 
     start_time = time.time()
 
@@ -279,21 +315,46 @@ def Train_Model(model, training_data, validation_data, params, log):
 
         log = log_model_progress(log, model, training_data, validation_data)
 
+        # Best model checkpoint tracking
+        if save_best_checkpoint:
+            # Get current validation loss for best model tracking
+            current_val_loss = log["valid_Loss"][-1]
+            recent_val_losses.append(current_val_loss)
+
+            # Keep only the last 'smoothing_window' losses
+            if len(recent_val_losses) > smoothing_window:
+                recent_val_losses.pop(0)
+
+            # Compute smoothed validation loss (average over recent epochs)
+            smoothed_val_loss = sum(recent_val_losses) / len(recent_val_losses)
+
+            # Update best model if we found a new minimum smoothed validation loss
+            if smoothed_val_loss < best_smoothed_loss:
+                best_smoothed_loss = smoothed_val_loss
+                best_epoch = epoch
+                best_model_state = copy.deepcopy(model.state_dict())
+
         if epoch % 5 == 0:
             elapsed_time = time.time() - start_time
             avg_epoch_time = elapsed_time / (epoch + 1)
             remaining_time = avg_epoch_time * (n_epochs - epoch - 1)
             print(f"   Epoch {epoch}, Loss: {epoch_loss:.2f}, Estimated Time Left: {remaining_time/60:.2f} min")
 
+    # Final training loss (from last epoch)
     model.eval()
     with torch.no_grad():
         if Period_train is not None:
             y_pred, sigma_pred = model(X_train, Period_train)
         else:
             y_pred, sigma_pred = model(X_train)
-        train_loss = loss_fn(y_pred, y_train, sigma_pred)
+        final_train_loss = loss_fn(y_pred, y_train, sigma_pred)
 
-    return model, log, train_loss
+    # Return based on checkpoint mode
+    if save_best_checkpoint:
+        print(f"\n   📌 Best model checkpoint: Epoch {best_epoch} (smoothed val_loss={best_smoothed_loss:.4f})")
+        return model, log, final_train_loss, best_model_state, best_epoch
+    else:
+        return model, log, final_train_loss
 
 
 # ==============================================================================
