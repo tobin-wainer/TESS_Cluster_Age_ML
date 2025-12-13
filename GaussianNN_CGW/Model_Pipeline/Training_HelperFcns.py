@@ -218,6 +218,7 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
 def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
                      epoch=None, start_time=None, use_periodogram=False):
     n_batches = 0
+    from datetime import datetime
 
     for track, batch in enumerate(train_loader, 1):
         if use_periodogram:
@@ -232,7 +233,8 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
 
         if track % 30 == 0 and start_time is not None:
             elapsed_time = time.time() - start_time
-            print(f"      Epoch {epoch}, Batch {track}, Loss: {batch_loss:.4f}")
+            wall_time = datetime.now().strftime("%H:%M:%S")
+            print(f"      [{wall_time}] Epoch {epoch}, Batch {track}/{len(train_loader)}, Loss: {batch_loss:.4f}, Elapsed: {elapsed_time/60:.1f}min")
 
     avg_epoch_loss = epoch_loss / n_batches
     return model, avg_epoch_loss
@@ -286,7 +288,9 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         train_dataset = TensorDataset(X_train, y_train)
 
     # Load it into a Data Loader to enable batch training
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # Use multiple workers for parallel data loading (4 workers is good for 8-core CPU)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                             num_workers=4, pin_memory=False)
 
     # Define Loss Fcn and Optimizer
     loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
@@ -301,13 +305,16 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         recent_val_losses = []  # Store recent validation losses for smoothing
 
     start_time = time.time()
+    from datetime import datetime
 
     for epoch in range(n_epochs):
+        epoch_start = time.time()
         model.train()
         epoch_loss = 0.0
 
         # Run single epoch with or without periodogram
-        model, epoch_loss = Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss, use_periodogram=use_periodogram)
+        model, epoch_loss = Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss,
+                                            epoch=epoch, start_time=start_time, use_periodogram=use_periodogram)
         log["epoch"].append(epoch)
         log["mean_batch_loss"].append(epoch_loss)
 
@@ -336,9 +343,13 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
 
         if epoch % 5 == 0:
             elapsed_time = time.time() - start_time
+            epoch_time = time.time() - epoch_start
             avg_epoch_time = elapsed_time / (epoch + 1)
             remaining_time = avg_epoch_time * (n_epochs - epoch - 1)
-            print(f"   Epoch {epoch}, Loss: {epoch_loss:.2f}, Estimated Time Left: {remaining_time/60:.2f} min")
+            wall_time = datetime.now().strftime("%H:%M:%S")
+            val_loss = log["valid_Loss"][-1] if log["valid_Loss"] else 0.0
+            print(f"   [{wall_time}] Epoch {epoch}/{n_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"      Epoch time: {epoch_time:.1f}s, Avg: {avg_epoch_time:.1f}s, Total elapsed: {elapsed_time/60:.1f}min, Est. remaining: {remaining_time/60:.1f}min")
 
     # Final training loss (from last epoch)
     model.eval()
