@@ -407,7 +407,7 @@ def log_model_progress(log, model, train_data, valid_data):
 # Plotting Functions
 # ==============================================================================
 
-def plot_run_log(run_log, kfold=True):
+def plot_run_log(run_log, kfold=True, save_path=None):
     """
     Plot training log for a single run with K-fold cross-validation results.
 
@@ -417,6 +417,16 @@ def plot_run_log(run_log, kfold=True):
     3. Validation loss (total)
 
     Each K-fold is shown as a separate line with different colors.
+
+    Parameters:
+    -----------
+    run_log : dict
+        Training log dictionary containing params and fold results
+    kfold : bool
+        Whether to plot K-fold results (default: True)
+    save_path : str, optional
+        If provided, saves the figure to this path instead of showing it.
+        Should include the filename (e.g., 'path/to/run_0.png')
     """
     params = run_log['params']
 
@@ -483,5 +493,13 @@ def plot_run_log(run_log, kfold=True):
 
     plt.tight_layout(rect=[0, 0.05, 1, 0.96])
 
-    plt.show()
+    if save_path:
+        # Save to file instead of showing
+        import os
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        plt.close(fig)  # Close figure to free memory
+    else:
+        plt.show()
+
     return

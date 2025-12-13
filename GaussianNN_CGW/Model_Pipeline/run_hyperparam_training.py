@@ -6,6 +6,12 @@ This script loads data, runs a grid search over hyperparameters using K-fold cro
 and saves the results with timestamps.
 """
 
+# IMPORTANT: Set matplotlib backend BEFORE any imports that use matplotlib
+# This prevents hanging on headless systems (SSH/WSL without display)
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend (saves to files, doesn't show)
+
+from urllib.parse import non_hierarchical
 import numpy as np
 import torch
 import pickle
@@ -110,25 +116,8 @@ def run_hyperparameter_search(params_config=None):
 
     # Define hyperparameter grid (use provided config or default)
     if params_config is None:
-        params = {
-            'use_periodogram': [True],
-            'use_cnn': [False],
-            'decoupled': [False],
-            'learn_sigma': [True],
-
-            'n_layers': [2],
-            'Layer1_Size': [16],
-            'Layer2_Size': [8],
-
-            'dropout_prob': [0.3],
-            'lr': [0.33e-4, 1e-4, 3e-4, 9e-4, 27e-4],
-            'batch_size': [4, 20, 100],
-
-            'n_epochs': [50],
-            'artificial_loss_weight_factor': [1],
-            'weight_decay': [1e-6],
-            'num_kfolds': [7]
-        }
+       print("NO CONFIG PROVIDED")
+       return None
     else:
         params = params_config
 
@@ -196,9 +185,19 @@ def run_hyperparameter_search(params_config=None):
             seed=42
         )
 
-        # Plot run log (save to file instead of displaying)
+        # Plot run log (save to file for remote execution)
         try:
-            plot_run_log(all_runs_log[model_name][run_id])
+            # Create runtime_figs directory for saving plots
+            figs_dir = temp_files_path + 'runtime_figs/'
+            os.makedirs(figs_dir, exist_ok=True)
+
+            # Generate filename based on run parameters
+            fig_filename = f"run_{run_id}_lr{Params['lr']}_bs{Params['batch_size']}.png"
+            fig_path = os.path.join(figs_dir, fig_filename)
+
+            # Save plot to file instead of displaying
+            plot_run_log(all_runs_log[model_name][run_id], save_path=fig_path)
+            logging.info(f"   Plot saved to: {fig_filename}")
         except Exception as e:
             logging.warning(f"Could not generate plots: {e}")
 
