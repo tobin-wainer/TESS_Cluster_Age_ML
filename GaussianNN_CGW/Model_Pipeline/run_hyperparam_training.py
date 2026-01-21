@@ -22,12 +22,18 @@ from datetime import datetime
 from sklearn.model_selection import ParameterGrid
 import logging
 
-# Configure PyTorch to use all available CPU cores
-# Set before any torch operations
-torch.set_num_threads(8)  # Use all 8 logical cores
-torch.set_num_interop_threads(8)  # Parallelism for operations
-os.environ['OMP_NUM_THREADS'] = '8'  # OpenMP threads
-os.environ['MKL_NUM_THREADS'] = '8'  # MKL (Intel Math Kernel Library) threads
+# Emergency crash log
+import atexit
+def emergency_exit_log():
+    with open(project_dir_path + 'TempFiles/logs/EMERGENCY_EXIT.log', 'a') as f:
+        import traceback
+        f.write(f"\n{'='*70}\n")
+        f.write(f"Process exiting at: {datetime.now()}\n")
+        f.write(f"Stack trace:\n")
+        traceback.print_stack(file=f)
+        f.write(f"{'='*70}\n")
+        f.flush()
+atexit.register(emergency_exit_log)
 
 # Add project directory to path
 project_dir_path = os.path.dirname(os.path.abspath(__file__)) + "/"
@@ -49,28 +55,75 @@ from Training_HelperFcns import (
 from Kfold_HelperFcns import kfold_cross_validation, verify_kfold_split
 
 
+def initialize_device(use_gpu):
+    """Initialize device with error handling.
+
+    Args:
+        use_gpu: Boolean flag indicating whether to use GPU
+
+    Returns:
+        torch.device object (either 'cuda:0' or 'cpu')
+
+    Raises:
+        RuntimeError: If GPU requested but CUDA not available
+    """
+    if use_gpu:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPU training requested but CUDA not available!\n"
+                "Options:\n"
+                "  1. Set use_gpu=False\n"
+                "  2. Install CUDA-enabled PyTorch\n"
+                "  3. Check GPU drivers"
+            )
+        device = torch.device('cuda:0')
+        logging.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        logging.info(f"CUDA Version: {torch.version.cuda}")
+    else:
+        device = torch.device('cpu')
+        logging.info("Using CPU")
+
+        # Configure PyTorch to use all available CPU cores
+        torch.set_num_threads(8)  # Use all 8 logical cores
+        torch.set_num_interop_threads(8)  # Parallelism for operations
+        os.environ['OMP_NUM_THREADS'] = '8'  # OpenMP threads
+        os.environ['MKL_NUM_THREADS'] = '8'  # MKL (Intel Math Kernel Library) threads
+        logging.info(f"PyTorch threads: {torch.get_num_threads()}")
+        logging.info(f"PyTorch interop threads: {torch.get_num_interop_threads()}")
+
+    return device
+
+
 def setup_logging(log_dir):
-    """Setup logging to both file and console"""
+    """Setup logging to console only (tee will handle file logging)"""
+    # NOTE: No file handler - using tee to capture all output to log file
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f'training_{timestamp}.log')
 
+    # Only stream handler (stdout) - tee will redirect to file
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+
+    # Force flush after every write
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=[stream_handler],
+        force=True  # Reset any existing handlers
     )
-    return log_file, timestamp
+
+    # Disable buffering on stdout and stderr (force immediate writes to tee)
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)  # Also unbuffer stderr for exceptions
+
+    return None, timestamp  # No log_file since tee handles it
 
 
 def load_data(temp_files_path):
     """Load preprocessed training data"""
     logging.info("Loading training data...")
 
-    file_name = 'traintest_data4.pkl'
+    file_name = 'traintest_data5.pkl'
     with open(temp_files_path + file_name, 'rb') as f:
         PROCESSED_DATASET = pickle.load(f)
 
@@ -103,23 +156,24 @@ def run_hyperparameter_search(params_config=None):
     logging.info("="*70)
     logging.info("HYPERPARAMETER TRAINING STARTED")
     logging.info("="*70)
-    logging.info(f"Log file: {log_file}")
-    logging.info(f"PyTorch threads: {torch.get_num_threads()}")
-    logging.info(f"PyTorch interop threads: {torch.get_num_interop_threads()}")
-    logging.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', 'not set')}")
-    logging.info(f"MKL_NUM_THREADS: {os.environ.get('MKL_NUM_THREADS', 'not set')}")
+    logging.info(f"Log directory: {log_dir} (captured via tee to training_TIMESTAMP.log)")
+
+    # Initialize device (extract use_gpu from params)
+    # Since params values are lists for ParameterGrid, extract first value
+    if params_config is None:
+        print("NO CONFIG PROVIDED")
+        return None
+
+    use_gpu = params_config.get('use_gpu', [False])[0]
+    device = initialize_device(use_gpu)
 
     # Load data
     (X_train, X_test, period_train, period_test,
      y_train, y_test, feature_cols,
      train_cluster_names, test_cluster_names) = load_data(temp_files_path)
 
-    # Define hyperparameter grid (use provided config or default)
-    if params_config is None:
-       print("NO CONFIG PROVIDED")
-       return None
-    else:
-        params = params_config
+    # Use provided params config
+    params = params_config
 
     logging.info(f"Parameter grid: {params}")
     logging.info(f"Total configurations: {len(list(ParameterGrid(params)))}")
@@ -182,6 +236,7 @@ def run_hyperparameter_search(params_config=None):
             X_train, period_train, train_cluster_names, y_train,
             DualInputNN, Params,
             all_runs_log[model_name][run_id],
+            device=device,
             seed=42
         )
 
@@ -227,21 +282,95 @@ def run_hyperparameter_search(params_config=None):
     logging.info("="*70)
     logging.info("TRAINING COMPLETE!")
     logging.info(f"Results saved to: {output_path}")
-    logging.info(f"Log file: {log_file}")
+    logging.info(f"Logs saved to: {log_dir} (via tee)")
     logging.info("="*70)
 
     return all_runs_log, output_path
 
 
 if __name__ == "__main__":
+    import traceback
+    import signal
+
+    # Signal handler to catch external termination
+    def signal_handler(signum, frame):
+        print(f"\n{'='*70}", file=sys.stderr, flush=True)
+        print(f"⚠️  SIGNAL {signum} RECEIVED - PROCESS BEING TERMINATED", file=sys.stderr, flush=True)
+        print(f"Signal name: {signal.Signals(signum).name}", file=sys.stderr, flush=True)
+        print(f"{'='*70}", file=sys.stderr, flush=True)
+        sys.exit(128 + signum)
+
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+
     # Check if config file was provided (for remote execution)
     config_file = project_dir_path + 'TempFiles/remote_config.pkl'
 
-    if os.path.exists(config_file):
-        logging.info(f"Loading parameter config from {config_file}")
-        with open(config_file, 'rb') as f:
-            params_config = pickle.load(f)
-        run_hyperparameter_search(params_config)
-    else:
-        # Use default config
-        run_hyperparameter_search()
+    try:
+        print("="*70, flush=True)
+        print("🚀 STARTING HYPERPARAMETER TRAINING", flush=True)
+        print(f"PID: {os.getpid()}", flush=True)
+        print("="*70, flush=True)
+
+        if os.path.exists(config_file):
+            # Don't log before setup_logging() is called - just load the config
+            with open(config_file, 'rb') as f:
+                params_config = pickle.load(f)
+            run_hyperparameter_search(params_config)
+        else:
+            # Use default config
+            run_hyperparameter_search()
+
+        print("\n" + "="*70, flush=True)
+        print("✅ TRAINING COMPLETED SUCCESSFULLY", flush=True)
+        print("="*70, flush=True)
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("\n" + "="*70, file=sys.stderr, flush=True)
+        print("⚠️  TRAINING INTERRUPTED BY USER (Ctrl+C)", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        sys.exit(130)
+
+    except MemoryError as e:
+        print("\n" + "="*70, file=sys.stderr, flush=True)
+        print("💥 FATAL ERROR: OUT OF MEMORY", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        print(f"Error: {e}", file=sys.stderr, flush=True)
+        print("\nTroubleshooting:", file=sys.stderr, flush=True)
+        print("  1. Reduce batch_size in parameter grid", file=sys.stderr, flush=True)
+        print("  2. Reduce num_kfolds", file=sys.stderr, flush=True)
+        print("  3. Use smaller model (fewer layers/units)", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(137)
+
+    except RuntimeError as e:
+        print("\n" + "="*70, file=sys.stderr, flush=True)
+        print("💥 FATAL RUNTIME ERROR", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        print(f"Error: {e}", file=sys.stderr, flush=True)
+
+        # Check for GPU/CUDA errors
+        if "out of memory" in str(e).lower() or "cuda" in str(e).lower():
+            print("\n⚠️  GPU OUT OF MEMORY", file=sys.stderr, flush=True)
+            print("Troubleshooting:", file=sys.stderr, flush=True)
+            print("  1. Reduce batch_size", file=sys.stderr, flush=True)
+            print("  2. Use CPU instead (set use_gpu=False)", file=sys.stderr, flush=True)
+
+        print("="*70, file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print("\n" + "="*70, file=sys.stderr, flush=True)
+        print("💥 FATAL UNEXPECTED ERROR", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        print(f"Error type: {type(e).__name__}", file=sys.stderr, flush=True)
+        print(f"Error message: {e}", file=sys.stderr, flush=True)
+        print("="*70, file=sys.stderr, flush=True)
+        print("\nFull traceback:", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        print("="*70, file=sys.stderr, flush=True)
+        sys.exit(1)

@@ -33,7 +33,7 @@ from DataAnalysis_HelperFcns import mae, rmse, coverage, crps_gaussian, Loss_Com
 # Preprocessing Functions
 # ==============================================================================
 
-def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val):
+def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val, device=None):
     """
     Apply preprocessing (scaling, normalization) to training and validation data.
 
@@ -48,38 +48,54 @@ def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val
         Periodogram data (N, 1089) - raw, unnormalized
     y_train, y_val : torch.Tensor
         Target ages - raw, not de-meaned
+    device : torch.device or None
+        Device for validation data (training stays on CPU for DataLoader)
 
     Returns:
     --------
     X_train_scaled, X_val_scaled : torch.Tensor
-        Scaled summary statistics
+        Scaled summary statistics (train on CPU, val on device)
     period_train_norm, period_val_norm : torch.Tensor or None
-        Normalized periodograms
+        Normalized periodograms (train on CPU, val on device)
     y_train_demeaned, y_val_demeaned : torch.Tensor
-        De-meaned targets
+        De-meaned targets (train on CPU, val on device)
     scaler : StandardScaler
         Fitted scaler object
     y_mean : float
         Mean of training targets
     mean_peak_strength : float or None
         Mean peak strength for periodogram normalization (None if no periodogram)
+
+    Notes:
+    ------
+    Training data is kept on CPU so DataLoader can use pin_memory for efficient GPU transfer.
+    Only validation data is moved to device (since it's not batched).
     """
     from sklearn.preprocessing import StandardScaler
 
+    # Default to CPU if device not specified
+    if device is None:
+        device = torch.device('cpu')
+
     # 1. De-mean targets using training mean
     y_mean = y_train.mean().item()
+    # Training data stays on CPU for DataLoader
     y_train_demeaned = y_train - y_mean
-    y_val_demeaned = y_val - y_mean
+    # Validation data goes to device (not batched)
+    y_val_demeaned = (y_val - y_mean).to(device)
 
     # 2. Scale summary statistics
     scaler = StandardScaler()
+    # Training data: CPU (for DataLoader with pin_memory)
     X_train_scaled = torch.tensor(
         scaler.fit_transform(X_train.cpu().numpy()),
         dtype=torch.float32
     )
+    # Validation data: on device
     X_val_scaled = torch.tensor(
         scaler.transform(X_val.cpu().numpy()),
-        dtype=torch.float32
+        dtype=torch.float32,
+        device=device
     )
 
     # 3. Normalize periodograms (if provided)
@@ -87,8 +103,10 @@ def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val
         periodograms = period_train.cpu().numpy()
         mean_peak_strength = np.max(periodograms, axis=1).mean()
 
+        # Training: keep on CPU for DataLoader
         period_train_norm = period_train / mean_peak_strength
-        period_val_norm = period_val / mean_peak_strength
+        # Validation: move to device
+        period_val_norm = (period_val / mean_peak_strength).to(device)
     else:
         period_train_norm = None
         period_val_norm = None
@@ -175,23 +193,59 @@ def sanitize_batch(y_pred, sigma_pred, clip_sigma=(1e-7, 100.0), clip_pred=(-100
 # Batch and Epoch Training Functions
 # ==============================================================================
 
-def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_norm=250.0):
+def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_norm=250.0, device=None,
+                     batch_indices=None, cluster_names=None):
     optimizer.zero_grad()
 
+    # Move batch to device if specified
+    if device is not None:
+        X = X.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        if Period_X is not None:
+            Period_X = Period_X.to(device, non_blocking=True)
+
     # Model forward
-    if Period_X is not None:
-        y_pred, sigma_pred = model(X, Period_X)
-    else:
-        y_pred, sigma_pred = model(X)
+    try:
+        if Period_X is not None:
+            y_pred, sigma_pred = model(X, Period_X)
+        else:
+            y_pred, sigma_pred = model(X)
+    except RuntimeError as e:
+        print(f"[ERROR] Forward pass failed: {e}", flush=True)
+        print(f"  X shape: {X.shape}, device: {X.device}", flush=True)
+        if Period_X is not None:
+            print(f"  Period_X shape: {Period_X.shape}, device: {Period_X.device}", flush=True)
+        raise
 
     # Loss computation
     loss = loss_fn(y_pred, y, sigma_pred)
 
     if torch.isnan(loss) or torch.isinf(loss):
-        print("NaN or Inf detected in loss!")
+        print("NaN or Inf detected in loss!", flush=True)
         return model, loss.item()
 
-    loss.backward()
+    # Check for extreme loss values that will corrupt the model
+    loss_value = loss.item()
+    # if loss_value > 100.0:  # Normal losses are 0.5-3.0, anything >100 is catastrophic
+    #     warnings.warn(
+    #         f"EXTREME LOSS DETECTED: {loss_value:.2f} - SKIPPING THIS BATCH\n"
+    #         f"  y_pred range: [{y_pred.min().item():.2e}, {y_pred.max().item():.2e}]\n"
+    #         f"  y_true range: [{y.min().item():.2e}, {y.max().item():.2e}]\n"
+    #         f"  sigma_pred range: [{sigma_pred.min().item():.2e}, {sigma_pred.max().item():.2e}]\n"
+    #         f"DATA QUALITY ISSUE: Your training data contains extreme outliers."
+    #     )
+    #     print(f"[SKIP WARNING] Skipping batch with extreme loss {loss_value:.2f} to prevent model corruption", flush=True)
+    #     # Return without updating model weights
+    #     return model, loss_value
+
+    try:
+        loss.backward()
+    except RuntimeError as e:
+        print(f"[ERROR] backward() failed: {e}", flush=True)
+        print(f"  Loss value: {loss.item()}", flush=True)
+        print(f"  y_pred range: [{y_pred.min().item():.2e}, {y_pred.max().item():.2e}]", flush=True)
+        print(f"  sigma_pred range: [{sigma_pred.min().item():.2e}, {sigma_pred.max().item():.2e}]", flush=True)
+        raise
 
     # Check for NaN or Inf in gradients
     invalid_grad = False
@@ -203,38 +257,75 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
     grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
 
     if grad_norm_before > clip_grad_norm:
-        print(f"[CLIP WARNING] Gradient norm was clipped to {clip_grad_norm:.4f} (before: {grad_norm_before:.4f})")
-        #print('X', X)
+        print(f"[CLIP WARNING] Gradient norm was clipped to {clip_grad_norm:.4f} (before: {grad_norm_before:.4f})", flush=True)
+
+        # Diagnostic: identify which data points have extreme contributions
+        print(f"\t[GRADIENT DEBUG] Batch size: {X.shape[0]}", flush=True)
+        print(f"\t[GRADIENT DEBUG] y_true range: [{y.min().item():.4f}, {y.max().item():.4f}]", flush=True)
+        print(f"\t[GRADIENT DEBUG] y_pred range: [{y_pred.min().item():.4f}, {y_pred.max().item():.4f}]", flush=True)
+        print(f"\t[GRADIENT DEBUG] sigma_pred range: [{sigma_pred.min().item():.4f}, {sigma_pred.max().item():.4f}]", flush=True)
+
+        # Compute per-sample residuals to find problematic data points
+        residuals = (y - y_pred.detach()).abs()
+        normalized_residuals = residuals / (sigma_pred.detach() + 1e-8)
+
+        # Print ALL samples in batch (not just top 5)
+        print(f"\t[GRADIENT DEBUG] All {X.shape[0]} samples in batch:", flush=True)
+        for i in range(X.shape[0]):
+            # Get cluster name if available
+            if batch_indices is not None and cluster_names is not None:
+                orig_idx = batch_indices[i].item()
+                cluster = cluster_names[orig_idx]
+            else:
+                orig_idx = i
+                cluster = "N/A"
+
+            print(f"\t  Sample {orig_idx} ({cluster}): y_true={y[i].item():.4f}, "
+                  f"y_pred={y_pred[i].item():.4f}, sigma={sigma_pred[i].item():.4f}, "
+                  f"residual={residuals[i].item():.4f}, norm_resid={normalized_residuals[i].item():.4f}",
+                  flush=True)
 
     if invalid_grad:
         warnings.warn("Skipping optimizer step due to NaN or Inf in gradients.")
         print('Skipping optimizer')
     else:
-        optimizer.step()
+        try:
+            optimizer.step()
+        except RuntimeError as e:
+            print(f"[ERROR] optimizer.step() failed: {e}", flush=True)
+            print(f"  Gradient norm before clipping: {grad_norm_before:.4f}", flush=True)
+            raise
 
-    return model, loss.item()
+    return model, loss_value
 
 
 def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
-                     epoch=None, start_time=None, use_periodogram=False):
+                     epoch=None, start_time=None, use_periodogram=False, device=None,
+                     cluster_names=None):
     n_batches = 0
     from datetime import datetime
 
+    print(f"[EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+
     for track, batch in enumerate(train_loader, 1):
+        print(f"[BATCH START] Epoch {epoch}, Batch {track}/{len(train_loader)}", flush=True)
         if use_periodogram:
-            batch_X, batch_P, batch_y = batch
-            model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, Period_X=batch_P)
+            batch_X, batch_P, batch_y, batch_indices = batch
+            model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, Period_X=batch_P, device=device,
+                                                  batch_indices=batch_indices, cluster_names=cluster_names)
         else:
-            batch_X, batch_y = batch
-            model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn)
+            batch_X, batch_y, batch_indices = batch
+            model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, device=device,
+                                                  batch_indices=batch_indices, cluster_names=cluster_names)
 
         epoch_loss += batch_loss
         n_batches += 1
 
-        if track % 30 == 0 and start_time is not None:
+        # NOTE: Reduced from every 30 to every 10 batches for crash debugging. Revert if performance impact.
+        if track % 10 == 0 and start_time is not None:
             elapsed_time = time.time() - start_time
             wall_time = datetime.now().strftime("%H:%M:%S")
-            print(f"      [{wall_time}] Epoch {epoch}, Batch {track}/{len(train_loader)}, Loss: {batch_loss:.4f}, Elapsed: {elapsed_time/60:.1f}min")
+            print(f"      [{wall_time}] Epoch {epoch}, Batch {track}/{len(train_loader)}, Loss: {batch_loss:.4f}, Elapsed: {elapsed_time/60:.1f}min", flush=True)
 
     avg_epoch_loss = epoch_loss / n_batches
     return model, avg_epoch_loss
@@ -244,14 +335,15 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
 # Full Training Loop
 # ==============================================================================
 
-def Train_Model(model, training_data, validation_data, params, log, save_best_checkpoint=False):
+def Train_Model(model, training_data, validation_data, params, log, save_best_checkpoint=False, device=None,
+                cluster_names=None):
     """
     Train a model with optional best checkpoint saving.
 
     Parameters:
     -----------
     model : nn.Module
-        The model to train
+        The model to train (should already be on the correct device)
     training_data : tuple
         (X_train, Period_train, y_train)
     validation_data : tuple
@@ -264,6 +356,8 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         If True, tracks and returns best model checkpoint based on smoothed validation loss.
         If False, only returns final model (backward compatible).
         Default: False
+    device : torch.device or None
+        Device for training (default: CPU)
 
     Returns:
     --------
@@ -272,8 +366,24 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     If save_best_checkpoint=True:
         model, log, train_loss, best_model_state, best_epoch
     """
+    # Default to CPU if device not specified
+    if device is None:
+        device = torch.device('cpu')
+
     X_train, Period_train, y_train = training_data
     X_valid, Period_valid, y_valid = validation_data
+
+    # Keep original training data on CPU for DataLoader
+    # Create GPU copies for evaluation
+    X_train_eval = X_train.to(device)
+    Period_train_eval = Period_train.to(device) if Period_train is not None else None
+    y_train_eval = y_train.to(device)
+
+    # Move validation data to device once (it's reused every epoch)
+    X_valid = X_valid.to(device)
+    y_valid = y_valid.to(device)
+    if Period_valid is not None:
+        Period_valid = Period_valid.to(device)
 
     learning_rate = params['lr']
     batch_size = int(params['batch_size'])
@@ -282,15 +392,28 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     weight_decay = float(params['weight_decay'])  # FIXED: was int (converted 1e-06 to 0), now float
     use_periodogram = Period_train is not None
 
-    if use_periodogram:
-        train_dataset = TensorDataset(X_train, Period_train, y_train)
-    else:
-        train_dataset = TensorDataset(X_train, y_train)
+    # Create index tensor for tracking original sample indices (for gradient debug output)
+    indices = torch.arange(len(X_train))
 
-    # Load it into a Data Loader to enable batch training
-    # Use multiple workers for parallel data loading (4 workers is good for 8-core CPU)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                             num_workers=4, pin_memory=False)
+    if use_periodogram:
+        train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
+    else:
+        train_dataset = TensorDataset(X_train, y_train, indices)
+
+    # Configure DataLoader based on device type
+    # GPU: pin_memory=True for faster host->GPU transfer
+    # CPU: pin_memory=False
+    # num_workers=0 always (multi-process workers crash on WSL, and tiny dataset doesn't benefit)
+    pin_memory = (device.type == 'cuda')
+    num_workers = 0
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
 
     # Define Loss Fcn and Optimizer
     loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
@@ -314,13 +437,16 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
 
         # Run single epoch with or without periodogram
         model, epoch_loss = Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss,
-                                            epoch=epoch, start_time=start_time, use_periodogram=use_periodogram)
+                                            epoch=epoch, start_time=start_time, use_periodogram=use_periodogram,
+                                            device=device, cluster_names=cluster_names)
         log["epoch"].append(epoch)
         log["mean_batch_loss"].append(epoch_loss)
 
         ## LOG MODEL PROGRESS ##
-
-        log = log_model_progress(log, model, training_data, validation_data)
+        # Use GPU copies for evaluation (created once at start)
+        training_data_eval = (X_train_eval, Period_train_eval, y_train_eval)
+        validation_data_eval = (X_valid, Period_valid, y_valid)
+        log = log_model_progress(log, model, training_data_eval, validation_data_eval)
 
         # Best model checkpoint tracking
         if save_best_checkpoint:
@@ -351,14 +477,14 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
             print(f"   [{wall_time}] Epoch {epoch}/{n_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
             print(f"      Epoch time: {epoch_time:.1f}s, Avg: {avg_epoch_time:.1f}s, Total elapsed: {elapsed_time/60:.1f}min, Est. remaining: {remaining_time/60:.1f}min")
 
-    # Final training loss (from last epoch)
+    # Final training loss (from last epoch) - use GPU evaluation copies
     model.eval()
     with torch.no_grad():
-        if Period_train is not None:
-            y_pred, sigma_pred = model(X_train, Period_train)
+        if Period_train_eval is not None:
+            y_pred, sigma_pred = model(X_train_eval, Period_train_eval)
         else:
-            y_pred, sigma_pred = model(X_train)
-        final_train_loss = loss_fn(y_pred, y_train, sigma_pred)
+            y_pred, sigma_pred = model(X_train_eval)
+        final_train_loss = loss_fn(y_pred, y_train_eval, sigma_pred)
 
     # Return based on checkpoint mode
     if save_best_checkpoint:

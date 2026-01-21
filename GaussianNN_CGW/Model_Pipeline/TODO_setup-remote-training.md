@@ -1,5 +1,59 @@
 # Setup Remote Training - Current Status
 
+## 📋 Remote Training System Summary
+
+**Fully automated hyperparameter training on Windows desktop (8-core CPU + GTX 1080 Ti GPU) via Mac notebook**
+
+### How It Works:
+1. **Mac Jupyter notebook** → defines parameter grid (`params` dict)
+2. **rsync** → syncs code to Windows desktop (via WSL)
+3. **tmux session** → starts background training (survives SSH disconnect)
+4. **Training runs** → saves results + logs to `TempFiles/`
+5. **rsync back** → retrieves results to Mac `RemoteTempFiles/`
+6. **Load & analyze** → process results in notebook
+
+### Key Features:
+- ✅ **One-click execution** from notebook (`sync_to_remote()` + `start_remote_training(params)`)
+- ✅ **Background training** in tmux (non-blocking, persistent)
+- ✅ **GPU support** via `use_gpu` flag (20-30% speedup for small models, up to 8x for larger batches)
+- ✅ **Real-time monitoring** (`check_remote_status()`, `tail_remote_log()`, `monitor_gpu()`)
+- ✅ **Automatic result sync** (`sync_results_back()`)
+- ✅ **Kill function** (`kill_remote_training()`) for hung jobs
+
+### Available Functions:
+```python
+# Setup & Execution
+sync_to_remote()                    # Sync repo to remote
+start_remote_training(params)       # Start training in tmux
+kill_remote_training()              # Kill training session
+
+# Monitoring
+check_remote_status()               # Check if training running
+tail_remote_log(lines=50)           # View training logs
+monitor_gpu('remote', 2, 20)        # Monitor GPU utilization
+
+# GPU Tools
+check_gpu_remote()                  # Check GPU status/availability
+diagnose_gpu_remote()               # Troubleshoot GPU issues
+
+# Results
+sync_results_back()                 # Download results + logs + figures
+load_remote_results()               # Load .pkl results for analysis
+```
+
+### Performance:
+- **CPU (8 cores):** ~16.6 min for 7 folds × 50 epochs
+- **GPU (GTX 1080 Ti):** ~13 min for 7 folds × 50 epochs (batch_size=20)
+  - Note: Small model + small batch → GPU underutilized
+  - For better GPU speedup: use `batch_size=[64-256]` (4-8x faster, may affect convergence)
+
+### Connection:
+- **Mac** → SSH → **Windows** → WSL → conda env `ml` → Python
+- All commands wrapped in `wsl` prefix
+- Password-free via SSH keys (`C:\ProgramData\ssh\administrators_authorized_keys`)
+
+---
+
 ## Overview
 Setting up automated hyperparameter training on remote desktop (desktop-win) using rsync + tmux.
 

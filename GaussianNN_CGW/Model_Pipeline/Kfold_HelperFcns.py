@@ -19,7 +19,7 @@ from Training_HelperFcns import apply_preprocessing, Train_Model
 
 
 def kfold_cross_validation(
-    X1, X2, X_name, y, model_class, Params, single_run_log, k=5, seed=42
+    X1, X2, X_name, y, model_class, Params, single_run_log, device=None, k=5, seed=42
 ):
     """
     K-fold cross-validation with proper per-fold scaling.
@@ -42,9 +42,14 @@ def kfold_cross_validation(
     Scaling is applied inside each fold to prevent data leakage.
     """
     k = Params['num_kfolds']
+
+    # Initialize device (default to CPU if not provided)
+    if device is None:
+        device = torch.device('cpu')
+
     kfold_start = time.time()
     wall_time = datetime.now().strftime("%H:%M:%S")
-    print(f"[{wall_time}] Starting {k}-fold cross-validation")
+    print(f"[{wall_time}] Starting {k}-fold cross-validation on device: {device}")
 
     # Infer dimensions from data
     stats_dim = X1.shape[1]
@@ -89,7 +94,8 @@ def kfold_cross_validation(
          scaler, y_mean, mean_peak_strength) = apply_preprocessing(
             X1_train_raw, X1_val_raw,
             X2_train_raw, X2_val_raw,
-            y_train_raw, y_val_raw
+            y_train_raw, y_val_raw,
+            device=device
         )
 
         print(f"Validation clusters: {len(np.unique(X_name[val_idx]))} clusters")
@@ -97,6 +103,9 @@ def kfold_cross_validation(
         # Prepare data for training
         training_data = (X1_train, X2_train, y_train)
         validation_data = (X1_val, X2_val, y_val)
+
+        # Extract cluster names for training fold (for gradient debug output)
+        train_cluster_names_fold = [X_name[i] for i in train_idx]
 
         # Initialize model for this fold
         model_inputs = (
@@ -110,11 +119,13 @@ def kfold_cross_validation(
         )
 
         model = model_class(*model_inputs)
+        model = model.to(device)
 
         # Train the model
         training_log = single_run_log[fold_id]['log']
         model, training_log, _ = Train_Model(
-            model, training_data, validation_data, Params, training_log
+            model, training_data, validation_data, Params, training_log,
+            device=device, cluster_names=train_cluster_names_fold
         )
 
         # Save results
