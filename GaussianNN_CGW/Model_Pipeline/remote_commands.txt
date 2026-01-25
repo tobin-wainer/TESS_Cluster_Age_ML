@@ -1,0 +1,68 @@
+# ===========================================
+# REMOTE TRAINING WORKFLOW - QUICK REFERENCE
+# ===========================================
+
+# --- CONNECT ---
+ssh cgw35@desktop-win                    # SSH to Windows
+wsl                                      # Enter WSL from Windows CMD
+
+# --- OR: Direct to WSL (if configured) ---
+ssh cgw35@desktop-win -t "wsl"
+
+# --- ENVIRONMENT ---
+conda activate ml
+cd ~/projects/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline
+
+# --- GIT SYNC ---
+git pull                                 # Before starting work
+git add . && git commit -m "msg" && git push   # Before switching machines
+
+# --- JUPYTER (if not using VSCode) ---
+jupyter notebook --no-browser --port=8888
+
+# On local machine, forward port:
+ssh -L 8888:localhost:8888 cgw35@desktop-win -t "wsl -e jupyter notebook --no-browser --port=8888"
+
+# --- VSCODE REMOTE (recommended) ---
+# 1. Cmd+Shift+P -> "Remote-SSH: Connect to Host" -> desktop-win
+# 2. Open folder: /home/cgw35/projects/TESS_Cluster_Age_ML
+# 3. Select Python interpreter: ml conda env
+# 4. Run notebooks directly
+
+# --- TMUX (optional, for long runs) ---
+tmux new -s training                     # Start new session
+tmux attach -t training                  # Reattach after disconnect
+tmux kill-session -t training            # Kill session
+
+# --- MONITORING ---
+nvidia-smi                               # GPU status
+htop                                     # CPU/memory status
+
+# --- GPU VERIFICATION ---
+# Run this in a notebook cell to confirm GPU access:
+# import torch
+# print(f"CUDA available: {torch.cuda.is_available()}")
+# print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+# --- WSL CONFIG (one-time setup) ---
+# Create/edit ~/.wslconfig on Windows to prevent idle timeout:
+# [wsl2]
+# vmIdleTimeout=-1
+
+# --- CONDA ENV SYNC ---
+# If you add packages, update on both machines:
+# conda env export > environment.yml
+# # On other machine:
+# conda env update -f environment.yml
+
+# --- SYNC TEMPFILES (model results) ---
+# Run these from your LOCAL laptop in the Model_Pipeline directory
+
+# Pull results FROM remote Windows machine TO local laptop
+rsync -avz --rsync-path="wsl rsync" cgw35@desktop-win:~/projects/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline/TempFiles/ModelGridLogs/ ./TempFiles/ModelGridLogs/
+
+# Push results FROM local laptop TO remote Windows machine (if needed)
+rsync -avz ./TempFiles/ModelGridLogs/ --rsync-path="wsl rsync" cgw35@desktop-win:~/projects/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline/TempFiles/ModelGridLogs/
+
+# Dry run (preview what would be synced, doesn't actually copy)
+rsync -avzn --rsync-path="wsl rsync" cgw35@desktop-win:~/projects/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline/TempFiles/ModelGridLogs/ ./TempFiles/ModelGridLogs/

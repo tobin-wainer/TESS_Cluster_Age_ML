@@ -28,6 +28,17 @@ from itertools import cycle
 # Import evaluation metrics from DataAnalysis_HelperFcns
 from DataAnalysis_HelperFcns import mae, rmse, coverage, crps_gaussian, Loss_Components
 
+# Import pipeline configuration for device and DataLoader settings
+try:
+    from pipeline_config import config
+    DEFAULT_DEVICE = config.device
+    DEFAULT_NUM_WORKERS = config.num_workers
+    DEFAULT_PIN_MEMORY = config.pin_memory
+except ImportError:
+    DEFAULT_DEVICE = torch.device('cpu')
+    DEFAULT_NUM_WORKERS = 0
+    DEFAULT_PIN_MEMORY = False
+
 
 # ==============================================================================
 # Preprocessing Functions
@@ -73,9 +84,9 @@ def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val
     """
     from sklearn.preprocessing import StandardScaler
 
-    # Default to CPU if device not specified
+    # Default to configured device if not specified
     if device is None:
-        device = torch.device('cpu')
+        device = DEFAULT_DEVICE
 
     # 1. De-mean targets using training mean
     y_mean = y_train.mean().item()
@@ -363,9 +374,9 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     If save_best_checkpoint=True:
         model, log, train_loss, best_model_state, best_epoch
     """
-    # Default to CPU if device not specified
+    # Default to configured device if not specified
     if device is None:
-        device = torch.device('cpu')
+        device = DEFAULT_DEVICE
 
     X_train, Period_train, y_train = training_data
     X_valid, Period_valid, y_valid = validation_data
@@ -397,19 +408,16 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     else:
         train_dataset = TensorDataset(X_train, y_train, indices)
 
-    # Configure DataLoader based on device type
+    # Configure DataLoader using settings from pipeline_config
     # GPU: pin_memory=True for faster host->GPU transfer
     # CPU: pin_memory=False
-    # num_workers=0 always (multi-process workers crash on WSL, and tiny dataset doesn't benefit)
-    pin_memory = (device.type == 'cuda')
-    num_workers = 0
-
+    # num_workers from config (0 on WSL due to multiprocessing issues)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory
+        num_workers=DEFAULT_NUM_WORKERS,
+        pin_memory=DEFAULT_PIN_MEMORY
     )
 
     # Define Loss Fcn and Optimizer

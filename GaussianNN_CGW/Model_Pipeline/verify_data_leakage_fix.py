@@ -16,9 +16,8 @@ import pickle
 import sys
 from pathlib import Path
 
-# Setup paths
-project_dir_path = "/Users/howard_willard/Desktop/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline/"
-temp_files_path = project_dir_path + 'TempFiles/'
+# Setup paths using pipeline_config for portability
+from pipeline_config import pipeline_dir_path as project_dir_path, temp_files_path
 sys.path.append(project_dir_path)
 
 from Training_HelperFcns import apply_preprocessing

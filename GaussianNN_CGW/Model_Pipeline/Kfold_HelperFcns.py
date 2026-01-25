@@ -17,6 +17,13 @@ from torch.utils.data import DataLoader, TensorDataset, Subset
 from sklearn.model_selection import GroupKFold
 from Training_HelperFcns import apply_preprocessing, Train_Model
 
+# Import pipeline configuration for device defaults
+try:
+    from pipeline_config import config
+    DEFAULT_DEVICE = config.device
+except ImportError:
+    DEFAULT_DEVICE = torch.device('cpu')
+
 
 def kfold_cross_validation(
     X1, X2, X_name, y, model_class, Params, single_run_log, device=None, k=5, seed=42
@@ -43,9 +50,9 @@ def kfold_cross_validation(
     """
     k = Params['num_kfolds']
 
-    # Initialize device (default to CPU if not provided)
+    # Initialize device (use config default if not provided)
     if device is None:
-        device = torch.device('cpu')
+        device = DEFAULT_DEVICE
 
     kfold_start = time.time()
     wall_time = datetime.now().strftime("%H:%M:%S")
