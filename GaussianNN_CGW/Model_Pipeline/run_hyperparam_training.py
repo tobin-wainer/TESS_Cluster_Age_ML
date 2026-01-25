@@ -11,7 +11,6 @@ and saves the results with timestamps.
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend (saves to files, doesn't show)
 
-from urllib.parse import non_hierarchical
 import numpy as np
 import torch
 import pickle
@@ -34,6 +33,58 @@ def emergency_exit_log():
         f.write(f"{'='*70}\n")
         f.flush()
 atexit.register(emergency_exit_log)
+
+# Threading for heartbeat
+import threading
+
+# Global variables for heartbeat control
+_heartbeat_stop_event = threading.Event()
+_heartbeat_thread = None
+
+def write_pid_file():
+    """Write current process PID to a file for monitoring."""
+    pid_file = project_dir_path + 'TempFiles/logs/training.pid'
+    os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+    with open(pid_file, 'w') as f:
+        f.write(f"{os.getpid()}\n")
+        f.write(f"Started: {datetime.now()}\n")
+    return pid_file
+
+def heartbeat_writer(interval=30):
+    """
+    Write a heartbeat timestamp to a file every `interval` seconds.
+    This runs in a daemon thread so it won't prevent process exit.
+    """
+    heartbeat_file = project_dir_path + 'TempFiles/logs/heartbeat.txt'
+    os.makedirs(os.path.dirname(heartbeat_file), exist_ok=True)
+
+    count = 0
+    while not _heartbeat_stop_event.is_set():
+        try:
+            with open(heartbeat_file, 'w') as f:
+                f.write(f"Heartbeat #{count}\n")
+                f.write(f"PID: {os.getpid()}\n")
+                f.write(f"Time: {datetime.now()}\n")
+                f.write(f"Status: ALIVE\n")
+                f.flush()
+            count += 1
+        except Exception as e:
+            pass  # Silently ignore errors (file system issues, etc.)
+        _heartbeat_stop_event.wait(interval)
+
+def start_heartbeat():
+    """Start the heartbeat writer thread."""
+    global _heartbeat_thread
+    _heartbeat_stop_event.clear()
+    _heartbeat_thread = threading.Thread(target=heartbeat_writer, args=(30,), daemon=True)
+    _heartbeat_thread.start()
+    return _heartbeat_thread
+
+def stop_heartbeat():
+    """Stop the heartbeat writer thread."""
+    _heartbeat_stop_event.set()
+    if _heartbeat_thread:
+        _heartbeat_thread.join(timeout=5)
 
 # Add project directory to path
 project_dir_path = os.path.dirname(os.path.abspath(__file__)) + "/"
@@ -95,20 +146,35 @@ def initialize_device(use_gpu):
 
 
 def setup_logging(log_dir):
-    """Setup logging to console only (tee will handle file logging)"""
-    # NOTE: No file handler - using tee to capture all output to log file
+    """Setup logging to both console and file directly.
+
+    File logging is independent of tee, ensuring logs are captured even if
+    SSH disconnects or tee fails.
+    """
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Only stream handler (stdout) - tee will redirect to file
+    # Create timestamped log file for direct file logging
+    log_file = os.path.join(log_dir, f'training_{timestamp}.log')
+
+    # Stream handler (stdout) - also captured by tee if running
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(logging.INFO)
+
+    # File handler - writes directly to file, independent of tee
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(logging.INFO)
+
+    # Same format for both handlers
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    stream_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
 
     # Force flush after every write
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[stream_handler],
+        handlers=[stream_handler, file_handler],
         force=True  # Reset any existing handlers
     )
 
@@ -116,15 +182,20 @@ def setup_logging(log_dir):
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)  # Also unbuffer stderr for exceptions
 
-    return None, timestamp  # No log_file since tee handles it
+    return log_file, timestamp
 
 
-def load_data(temp_files_path):
-    """Load preprocessed training data"""
+def load_data(temp_files_path, dataset_name='traintest_data5.pkl'):
+    """Load preprocessed training data
+
+    Args:
+        temp_files_path: Path to TempFiles directory
+        dataset_name: Name of the dataset .pkl file (default: 'traintest_data5.pkl')
+    """
     logging.info("Loading training data...")
+    logging.info(f"Dataset: {dataset_name}")
 
-    file_name = 'traintest_data5.pkl'
-    with open(temp_files_path + file_name, 'rb') as f:
+    with open(temp_files_path + dataset_name, 'rb') as f:
         PROCESSED_DATASET = pickle.load(f)
 
     (X_train, X_test,
@@ -156,7 +227,7 @@ def run_hyperparameter_search(params_config=None):
     logging.info("="*70)
     logging.info("HYPERPARAMETER TRAINING STARTED")
     logging.info("="*70)
-    logging.info(f"Log directory: {log_dir} (captured via tee to training_TIMESTAMP.log)")
+    logging.info(f"Log file: {log_file}")
 
     # Initialize device (extract use_gpu from params)
     # Since params values are lists for ParameterGrid, extract first value
@@ -167,13 +238,16 @@ def run_hyperparameter_search(params_config=None):
     use_gpu = params_config.get('use_gpu', [False])[0]
     device = initialize_device(use_gpu)
 
+    # Extract dataset_name from config (not a list, just a string value)
+    dataset_name = params_config.get('dataset_name', 'traintest_data5.pkl')
+
     # Load data
     (X_train, X_test, period_train, period_test,
      y_train, y_test, feature_cols,
-     train_cluster_names, test_cluster_names) = load_data(temp_files_path)
+     train_cluster_names, test_cluster_names) = load_data(temp_files_path, dataset_name)
 
-    # Use provided params config
-    params = params_config
+    # Use provided params config, but remove non-grid params
+    params = {k: v for k, v in params_config.items() if k not in ('dataset_name', 'use_gpu')}
 
     logging.info(f"Parameter grid: {params}")
     logging.info(f"Total configurations: {len(list(ParameterGrid(params)))}")
@@ -282,7 +356,7 @@ def run_hyperparameter_search(params_config=None):
     logging.info("="*70)
     logging.info("TRAINING COMPLETE!")
     logging.info(f"Results saved to: {output_path}")
-    logging.info(f"Logs saved to: {log_dir} (via tee)")
+    logging.info(f"Logs saved to: {log_file}")
     logging.info("="*70)
 
     return all_runs_log, output_path
@@ -294,23 +368,67 @@ if __name__ == "__main__":
 
     # Signal handler to catch external termination
     def signal_handler(signum, frame):
+        signal_name = signal.Signals(signum).name
+        timestamp = datetime.now().isoformat()
+
+        # Write to signal log file for post-mortem analysis
+        signal_log_file = project_dir_path + 'TempFiles/logs/SIGNAL_RECEIVED.log'
+        try:
+            os.makedirs(os.path.dirname(signal_log_file), exist_ok=True)
+            with open(signal_log_file, 'a') as f:
+                f.write(f"\n{'='*70}\n")
+                f.write(f"SIGNAL RECEIVED AT: {timestamp}\n")
+                f.write(f"Signal number: {signum}\n")
+                f.write(f"Signal name: {signal_name}\n")
+                f.write(f"PID: {os.getpid()}\n")
+                if signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGPIPE):
+                    f.write(f"ACTION: IGNORED (continuing execution)\n")
+                else:
+                    f.write(f"ACTION: TERMINATING\n")
+                f.write(f"{'='*70}\n")
+                f.flush()
+        except Exception:
+            pass  # Don't let logging errors prevent signal handling
+
+        # For SIGHUP, SIGTERM, and SIGPIPE, log but DON'T exit - we want to survive SSH disconnect
+        if signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGPIPE):
+            print(f"\n[{timestamp}] {signal_name} received - IGNORING, continuing training...",
+                  file=sys.stderr, flush=True)
+            return  # Continue running!
+
+        # For other signals (SIGINT), exit as before
         print(f"\n{'='*70}", file=sys.stderr, flush=True)
-        print(f"⚠️  SIGNAL {signum} RECEIVED - PROCESS BEING TERMINATED", file=sys.stderr, flush=True)
-        print(f"Signal name: {signal.Signals(signum).name}", file=sys.stderr, flush=True)
+        print(f"SIGNAL {signum} ({signal_name}) RECEIVED - PROCESS BEING TERMINATED", file=sys.stderr, flush=True)
+        print(f"Time: {timestamp}", file=sys.stderr, flush=True)
+        print(f"Signal logged to: TempFiles/logs/SIGNAL_RECEIVED.log", file=sys.stderr, flush=True)
         print(f"{'='*70}", file=sys.stderr, flush=True)
+
+        # Stop heartbeat before exiting
+        stop_heartbeat()
+
         sys.exit(128 + signum)
 
     # Register signal handlers
     signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGHUP, signal_handler)   # SSH disconnect
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)  # Ignore broken pipe - CRITICAL for SSH disconnect
 
     # Check if config file was provided (for remote execution)
     config_file = project_dir_path + 'TempFiles/remote_config.pkl'
 
     try:
         print("="*70, flush=True)
-        print("🚀 STARTING HYPERPARAMETER TRAINING", flush=True)
+        print("STARTING HYPERPARAMETER TRAINING", flush=True)
         print(f"PID: {os.getpid()}", flush=True)
+        print("="*70, flush=True)
+
+        # Write PID file and start heartbeat for monitoring
+        pid_file = write_pid_file()
+        print(f"PID file written to: {pid_file}", flush=True)
+
+        start_heartbeat()
+        print("Heartbeat thread started (30s interval)", flush=True)
         print("="*70, flush=True)
 
         if os.path.exists(config_file):
@@ -322,8 +440,11 @@ if __name__ == "__main__":
             # Use default config
             run_hyperparameter_search()
 
+        # Stop heartbeat and clean up
+        stop_heartbeat()
+
         print("\n" + "="*70, flush=True)
-        print("✅ TRAINING COMPLETED SUCCESSFULLY", flush=True)
+        print("TRAINING COMPLETED SUCCESSFULLY", flush=True)
         print("="*70, flush=True)
         sys.exit(0)
 

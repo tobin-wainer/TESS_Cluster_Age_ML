@@ -194,7 +194,7 @@ def sanitize_batch(y_pred, sigma_pred, clip_sigma=(1e-7, 100.0), clip_pred=(-100
 # ==============================================================================
 
 def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_norm=250.0, device=None,
-                     batch_indices=None, cluster_names=None):
+                     batch_indices=None, cluster_names=None, epoch=None):
     optimizer.zero_grad()
 
     # Move batch to device if specified
@@ -256,33 +256,29 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
 
     grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
 
-    if grad_norm_before > clip_grad_norm:
-        print(f"[CLIP WARNING] Gradient norm was clipped to {clip_grad_norm:.4f} (before: {grad_norm_before:.4f})", flush=True)
-
-        # Diagnostic: identify which data points have extreme contributions
-        print(f"\t[GRADIENT DEBUG] Batch size: {X.shape[0]}", flush=True)
-        print(f"\t[GRADIENT DEBUG] y_true range: [{y.min().item():.4f}, {y.max().item():.4f}]", flush=True)
-        print(f"\t[GRADIENT DEBUG] y_pred range: [{y_pred.min().item():.4f}, {y_pred.max().item():.4f}]", flush=True)
-        print(f"\t[GRADIENT DEBUG] sigma_pred range: [{sigma_pred.min().item():.4f}, {sigma_pred.max().item():.4f}]", flush=True)
+    if grad_norm_before > clip_grad_norm and epoch is not None and epoch > 5:
+        print(f"\t[CLIP WARNING] Grad norm clipped to {clip_grad_norm:.0f} (was {grad_norm_before:.0f})", flush=True)
 
         # Compute per-sample residuals to find problematic data points
         residuals = (y - y_pred.detach()).abs()
         normalized_residuals = residuals / (sigma_pred.detach() + 1e-8)
 
-        # Print ALL samples in batch (not just top 5)
-        print(f"\t[GRADIENT DEBUG] All {X.shape[0]} samples in batch:", flush=True)
-        for i in range(X.shape[0]):
+        # Get indices of top 2 highest normalized residuals
+        top_k = min(2, X.shape[0])
+        _, top_indices = torch.topk(normalized_residuals.squeeze(), top_k)
+
+        for i in top_indices:
             # Get cluster name if available
             if batch_indices is not None and cluster_names is not None:
                 orig_idx = batch_indices[i].item()
                 cluster = cluster_names[orig_idx]
             else:
-                orig_idx = i
+                orig_idx = i.item()
                 cluster = "N/A"
 
-            print(f"\t  Sample {orig_idx} ({cluster}): y_true={y[i].item():.4f}, "
+            print(f"\t\t  Sample {orig_idx} ({cluster}): y_true={y[i].item():.4f}, "
                   f"y_pred={y_pred[i].item():.4f}, sigma={sigma_pred[i].item():.4f}, "
-                  f"residual={residuals[i].item():.4f}, norm_resid={normalized_residuals[i].item():.4f}",
+                  f"norm_resid={normalized_residuals[i].item():.4f}",
                   flush=True)
 
     if invalid_grad:
@@ -308,15 +304,16 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
     print(f"[EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
 
     for track, batch in enumerate(train_loader, 1):
-        print(f"[BATCH START] Epoch {epoch}, Batch {track}/{len(train_loader)}", flush=True)
+        if track % 10 == 0 or track == 1:
+            print(f"[BATCH] Epoch {epoch}, Batch {track}/{len(train_loader)}", flush=True)
         if use_periodogram:
             batch_X, batch_P, batch_y, batch_indices = batch
             model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, Period_X=batch_P, device=device,
-                                                  batch_indices=batch_indices, cluster_names=cluster_names)
+                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch)
         else:
             batch_X, batch_y, batch_indices = batch
             model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, device=device,
-                                                  batch_indices=batch_indices, cluster_names=cluster_names)
+                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch)
 
         epoch_loss += batch_loss
         n_batches += 1
