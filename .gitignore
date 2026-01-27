@@ -1,8 +1,10 @@
 *.pkl
 *.pt
 *.fits
+*.png
 .ipynb_checkpoints/
 *.ipynb_checkpoints*
 GaussianNN_CGW/Model_Pipeline/TempFiles/
+GaussianNN_CGW/Model_Pipeline/RemoteTempFiles/
 __pycache__/
 

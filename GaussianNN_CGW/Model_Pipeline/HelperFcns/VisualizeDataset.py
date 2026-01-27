@@ -1,6 +1,6 @@
 
 
-def visualize_feature_distributions(data, feature_cols):
+def visualize_feature_distributions(data, feature_cols, plot_full_range=False):
     fig, axs = plt.subplots(4, 5, figsize=(15,15))
     
     for index, col in enumerate(feature_cols):
@@ -14,10 +14,15 @@ def visualize_feature_distributions(data, feature_cols):
         lower_bound = median - 4 * scale_factor * mad
         upper_bound = median + 4 * scale_factor * mad
         
-        axs[i, j].hist(data[:, index], bins=100, range=(lower_bound, upper_bound))
+        if plot_full_range:
+            axs[i, j].hist(data[:, index], bins=1000)#, range=(lower_bound, upper_bound))
+            #axs[i, j].set_xlim([lower_bound, upper_bound])
+        else:
+            axs[i, j].hist(data[:, index], bins=1000, range=(lower_bound, upper_bound))
+            axs[i, j].set_xlim([lower_bound, upper_bound])
+
         axs[i, j].set_title(col)
         axs[i, j].set_yscale('log')
-        axs[i, j].set_xlim([lower_bound, upper_bound])
     
     plt.tight_layout()
     plt.show()
@@ -51,25 +56,33 @@ def visualize_mass_bin_distribution(y_train, y_test):
             ax.set_xlim([-1.6, 2.2])
     plt.show()
     return
-def visualize_summary_stats(data, data_y, feature_cols):
-    fig, axs = plt.subplots(5, 4, figsize=(15,20))
+
+def visualize_summary_stats(data, data_y, feature_cols, mad_bounds=4):
+    
+    n_features = len(feature_cols)
+    ncols = 4
+    nrows = int(np.ceil(n_features / ncols))
+
+    fig, axs = plt.subplots(nrows, ncols, figsize=(4*ncols, 4*nrows))
+    axs = np.atleast_1d(axs)  # safe for 1-row cases
     
     for index, col in enumerate(feature_cols):
-        i = index // 4
-        j = index % 4
+        ax = axs.flat[index]
+        
         #print(i, j, col)
         median = np.nanmedian(data[:, index])  # Ignore NaNs
         mad = np.nanmedian(np.abs(data[:, index] - median))  # Compute MAD
-        scale_factor = 1.4826  # Approximate conversion to std deviation
-        lower_bound = median - 4 * scale_factor * mad
-        upper_bound = median + 4 * scale_factor * mad
         
-        axs[i, j].scatter(data[:, index], data_y, s=0.2, alpha=0.5)
-        axs[i, j].set_title(col)
+        ax.scatter(data[:, index], data_y, s=0.2, alpha=0.5)
+        ax.set_title(col)
         #axs[i, j].set_yscale('log')
-        axs[i, j].set_xlim([lower_bound, upper_bound])
-        axs[i, j].set_xlabel(col)
-        axs[i, j].set_ylabel('log Cluster Age')
+        if mad_bounds!=None:
+            scale_factor = 1.4826  # Approximate conversion to std deviation
+            lower_bound = median - mad_bounds * scale_factor * mad
+            upper_bound = median + mad_bounds * scale_factor * mad
+            ax.set_xlim([lower_bound, upper_bound])
+        ax.set_xlabel(col)
+        ax.set_ylabel('log Cluster Age')
     
     plt.tight_layout()
     plt.show()
