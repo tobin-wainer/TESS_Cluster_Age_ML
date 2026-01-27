@@ -205,7 +205,7 @@ def sanitize_batch(y_pred, sigma_pred, clip_sigma=(1e-7, 100.0), clip_pred=(-100
 # ==============================================================================
 
 def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_norm=250.0, device=None,
-                     batch_indices=None, cluster_names=None, epoch=None):
+                     batch_indices=None, cluster_names=None, epoch=None, verbose=0):
     optimizer.zero_grad()
 
     # Move batch to device if specified
@@ -237,17 +237,19 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
 
     # Check for extreme loss values that will corrupt the model
     loss_value = loss.item()
-    # if loss_value > 100.0:  # Normal losses are 0.5-3.0, anything >100 is catastrophic
-    #     warnings.warn(
-    #         f"EXTREME LOSS DETECTED: {loss_value:.2f} - SKIPPING THIS BATCH\n"
-    #         f"  y_pred range: [{y_pred.min().item():.2e}, {y_pred.max().item():.2e}]\n"
-    #         f"  y_true range: [{y.min().item():.2e}, {y.max().item():.2e}]\n"
-    #         f"  sigma_pred range: [{sigma_pred.min().item():.2e}, {sigma_pred.max().item():.2e}]\n"
-    #         f"DATA QUALITY ISSUE: Your training data contains extreme outliers."
-    #     )
-    #     print(f"[SKIP WARNING] Skipping batch with extreme loss {loss_value:.2f} to prevent model corruption", flush=True)
-    #     # Return without updating model weights
-    #     return model, loss_value
+    
+    if verbose>10:
+        if loss_value > 100.0:  # Normal losses are 0.5-3.0, anything >100 is catastrophic
+            warnings.warn(
+                f"EXTREME LOSS DETECTED: {loss_value:.2f} - SKIPPING THIS BATCH\n"
+                f"  y_pred range: [{y_pred.min().item():.2e}, {y_pred.max().item():.2e}]\n"
+                f"  y_true range: [{y.min().item():.2e}, {y.max().item():.2e}]\n"
+                f"  sigma_pred range: [{sigma_pred.min().item():.2e}, {sigma_pred.max().item():.2e}]\n"
+                f"DATA QUALITY ISSUE: Your training data contains extreme outliers."
+            )
+            print(f"[SKIP WARNING] Skipping batch with extreme loss {loss_value:.2f} to prevent model corruption", flush=True)
+            # Return without updating model weights
+            return model, loss_value
 
     try:
         loss.backward()
@@ -266,9 +268,10 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
             print(f"Bad gradient detected in {name}")
 
     grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-
+    
     if grad_norm_before > clip_grad_norm and epoch is not None and epoch > 5:
-        print(f"\t[CLIP WARNING] Grad norm clipped to {clip_grad_norm:.0f} (was {grad_norm_before:.0f})", flush=True)
+        if verbose>1:
+            print(f"\t[CLIP WARNING] Grad norm clipped to {clip_grad_norm:.0f} (was {grad_norm_before:.0f})", flush=True)
 
         # Compute per-sample residuals to find problematic data points
         residuals = (y - y_pred.detach()).abs()
@@ -286,15 +289,15 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
             else:
                 orig_idx = i.item()
                 cluster = "N/A"
-
-            print(f"\t\t  Sample {orig_idx} ({cluster}): y_true={y[i].item():.4f}, "
-                  f"y_pred={y_pred[i].item():.4f}, sigma={sigma_pred[i].item():.4f}, "
-                  f"norm_resid={normalized_residuals[i].item():.4f}",
-                  flush=True)
+            if verbose>2:
+                print(f"\t\t  Sample {orig_idx} ({cluster}): y_true={y[i].item():.4f}, "
+                      f"y_pred={y_pred[i].item():.4f}, sigma={sigma_pred[i].item():.4f}, "
+                      f"norm_resid={normalized_residuals[i].item():.4f}",
+                      flush=True)
 
     if invalid_grad:
-        warnings.warn("Skipping optimizer step due to NaN or Inf in gradients.")
-        print('Skipping optimizer')
+        if verbose>0.5:
+            warnings.warn("Skipping optimizer step due to NaN or Inf in gradients.")
     else:
         try:
             optimizer.step()
@@ -308,32 +311,38 @@ def Run_Single_Batch(model, optimizer, X, y, loss_fn, Period_X=None, clip_grad_n
 
 def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
                      epoch=None, start_time=None, use_periodogram=False, device=None,
-                     cluster_names=None):
+                     cluster_names=None, verbose=0):
     n_batches = 0
     from datetime import datetime
 
-    print(f"[EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+    if verbose>2:
+        print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+    elif verbose>1:
+        if epoch%10==0:
+            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+    elif verbose>0:
+        if epoch%10==0:
+            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
 
     for track, batch in enumerate(train_loader, 1):
-        if track % 10 == 0 or track == 1:
-            print(f"[BATCH] Epoch {epoch}, Batch {track}/{len(train_loader)}", flush=True)
         if use_periodogram:
             batch_X, batch_P, batch_y, batch_indices = batch
             model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, Period_X=batch_P, device=device,
-                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch)
+                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch, verbose=verbose)
         else:
             batch_X, batch_y, batch_indices = batch
             model, batch_loss = Run_Single_Batch(model, optimizer, batch_X, batch_y, loss_fn, device=device,
-                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch)
+                                                  batch_indices=batch_indices, cluster_names=cluster_names, epoch=epoch, verbose=verbose)
 
         epoch_loss += batch_loss
         n_batches += 1
 
         # NOTE: Reduced from every 30 to every 10 batches for crash debugging. Revert if performance impact.
-        if track % 10 == 0 and start_time is not None:
-            elapsed_time = time.time() - start_time
-            wall_time = datetime.now().strftime("%H:%M:%S")
-            print(f"      [{wall_time}] Epoch {epoch}, Batch {track}/{len(train_loader)}, Loss: {batch_loss:.4f}, Elapsed: {elapsed_time/60:.1f}min", flush=True)
+        if verbose>5:
+            if track % 50 == 0 and start_time is not None:
+                elapsed_time = time.time() - start_time
+                wall_time = datetime.now().strftime("%H:%M:%S")
+                print(f"      [{wall_time}] Epoch {epoch}, Batch {track}/{len(train_loader)}, Loss: {batch_loss:.4f}, Elapsed: {elapsed_time/60:.1f}min", flush=True)
 
     avg_epoch_loss = epoch_loss / n_batches
     return model, avg_epoch_loss
@@ -344,7 +353,7 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
 # ==============================================================================
 
 def Train_Model(model, training_data, validation_data, params, log, save_best_checkpoint=False, device=None,
-                cluster_names=None):
+                cluster_names=None, verbose=0):
     """
     Train a model with optional best checkpoint saving.
 
@@ -443,7 +452,7 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         # Run single epoch with or without periodogram
         model, epoch_loss = Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss,
                                             epoch=epoch, start_time=start_time, use_periodogram=use_periodogram,
-                                            device=device, cluster_names=cluster_names)
+                                            device=device, cluster_names=cluster_names, verbose=verbose)
         log["epoch"].append(epoch)
         log["mean_batch_loss"].append(epoch_loss)
 
@@ -472,15 +481,16 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
                 best_epoch = epoch
                 best_model_state = copy.deepcopy(model.state_dict())
 
-        if epoch % 5 == 0:
-            elapsed_time = time.time() - start_time
-            epoch_time = time.time() - epoch_start
-            avg_epoch_time = elapsed_time / (epoch + 1)
-            remaining_time = avg_epoch_time * (n_epochs - epoch - 1)
-            wall_time = datetime.now().strftime("%H:%M:%S")
-            val_loss = log["valid_Loss"][-1] if log["valid_Loss"] else 0.0
-            print(f"   [{wall_time}] Epoch {epoch}/{n_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
-            print(f"      Epoch time: {epoch_time:.1f}s, Avg: {avg_epoch_time:.1f}s, Total elapsed: {elapsed_time/60:.1f}min, Est. remaining: {remaining_time/60:.1f}min")
+        if verbose>1:
+            if epoch % 5 == 0:
+                elapsed_time = time.time() - start_time
+                epoch_time = time.time() - epoch_start
+                avg_epoch_time = elapsed_time / (epoch + 1)
+                remaining_time = avg_epoch_time * (n_epochs - epoch - 1)
+                wall_time = datetime.now().strftime("%H:%M:%S")
+                val_loss = log["valid_Loss"][-1] if log["valid_Loss"] else 0.0
+                print(f"   [{wall_time}] Epoch {epoch}/{n_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+                print(f"      Epoch time: {epoch_time:.1f}s, Avg: {avg_epoch_time:.1f}s, Total elapsed: {elapsed_time/60:.1f}min, Est. remaining: {remaining_time/60:.1f}min")
 
     # Final training loss (from last epoch) - use GPU evaluation copies
     model.eval()

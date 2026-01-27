@@ -26,7 +26,7 @@ except ImportError:
 
 
 def kfold_cross_validation(
-    X1, X2, X_name, y, model_class, Params, single_run_log, device=None, k=5, seed=42
+    X1, X2, X_name, y, model_class, Params, single_run_log, device=None, k=5, seed=42, verbose=0
 ):
     """
     K-fold cross-validation with proper per-fold scaling.
@@ -132,7 +132,8 @@ def kfold_cross_validation(
         training_log = single_run_log[fold_id]['log']
         model, training_log, _ = Train_Model(
             model, training_data, validation_data, Params, training_log,
-            device=device, cluster_names=train_cluster_names_fold
+            device=device, cluster_names=train_cluster_names_fold,
+            verbose=verbose
         )
 
         # Save results
