@@ -12,7 +12,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy import stats
+from scipy.special import erfinv
 import torch
+import torch.nn as nn
 
 # Import existing helper functions for metrics
 from DataAnalysis_HelperFcns import mae, rmse, coverage, crps_gaussian
@@ -589,7 +591,7 @@ def plot_coverage_calibration(y_true, y_pred, sigma_pred,
 
     # For Gaussian distribution: confidence_level = erf(num_sigma / sqrt(2))
     # Inverse: num_sigma = sqrt(2) * erf_inv(confidence_level)
-    num_sigmas = np.sqrt(2) * stats.erfinv(confidence_levels)
+    num_sigmas = np.sqrt(2) * erfinv(confidence_levels)
 
     # Compute empirical coverage at each level
     empirical_coverage = []
@@ -749,4 +751,272 @@ def plot_uncertainty_distribution(sigma_pred_train, sigma_pred_test,
 
     plt.tight_layout()
 
+    return fig, axs
+
+
+# ==============================================================================
+# MC DROPOUT UNCERTAINTY DECOMPOSITION
+# ==============================================================================
+
+def enable_dropout(model):
+    """
+    Enable dropout layers during inference for MC Dropout sampling.
+    Sets only nn.Dropout modules to train mode while keeping everything else
+    (e.g., BatchNorm) in eval mode.
+    """
+    for m in model.modules():
+        if isinstance(m, nn.Dropout):
+            m.train()
+
+
+def disable_dropout(model):
+    """
+    Disable dropout layers (restore full eval mode).
+    """
+    model.eval()
+
+
+def mc_dropout_predict(model, X, X_period, num_samples=100):
+    """
+    Run Monte Carlo Dropout sampling to decompose uncertainty into
+    epistemic (model uncertainty) and aleatoric (data uncertainty).
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained DualInputNN (or compatible) model with dropout layers.
+    X : torch.Tensor
+        Scaled summary-statistic features, shape [N, D].
+    X_period : torch.Tensor
+        Normalised periodogram features, shape [N, P].
+    num_samples : int
+        Number of stochastic forward passes.
+
+    Returns
+    -------
+    dict with keys:
+        mean_pred        – mean of MC predictions              [N]
+        std_pred         – std of MC predictions (epistemic)   [N]
+        mean_sigma       – mean of predicted sigmas (aleatoric)[N]
+        total_uncertainty – sqrt(std_pred^2 + mean_sigma^2)    [N]
+        all_preds        – raw MC predictions   [num_samples, N]
+        all_sigmas       – raw MC sigmas        [num_samples, N]
+    """
+    # Enable dropout for stochastic forward passes
+    enable_dropout(model)
+
+    all_preds = []
+    all_sigmas = []
+
+    with torch.no_grad():
+        for _ in range(num_samples):
+            y_pred, sigma = model(X, X_period)
+            all_preds.append(y_pred.cpu().numpy().flatten())
+            all_sigmas.append(sigma.cpu().numpy().flatten())
+
+    # Restore eval mode
+    disable_dropout(model)
+
+    all_preds = np.array(all_preds)    # [num_samples, N]
+    all_sigmas = np.array(all_sigmas)  # [num_samples, N]
+
+    mean_pred = all_preds.mean(axis=0)
+    std_pred = all_preds.std(axis=0)
+    mean_sigma = all_sigmas.mean(axis=0)
+    total_uncertainty = np.sqrt(std_pred**2 + mean_sigma**2)
+
+    return {
+        'mean_pred': mean_pred,
+        'std_pred': std_pred,
+        'mean_sigma': mean_sigma,
+        'total_uncertainty': total_uncertainty,
+        'all_preds': all_preds,
+        'all_sigmas': all_sigmas,
+    }
+
+
+def plot_mc_dropout_predictions(mc_results, y_true, sort_by_true=True,
+                                 figsize=(12, 6)):
+    """
+    Plot MC Dropout predictions with epistemic and aleatoric error bands.
+
+    Parameters
+    ----------
+    mc_results : dict
+        Output of mc_dropout_predict.
+    y_true : torch.Tensor or np.ndarray
+        True target values (original scale, same as mean_pred).
+    sort_by_true : bool
+        If True, sort samples by true age for clearer visualisation.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, ax
+    """
+    if torch.is_tensor(y_true):
+        y_true = y_true.cpu().numpy().flatten()
+
+    mean_pred = mc_results['mean_pred']
+    std_pred = mc_results['std_pred']
+    mean_sigma = mc_results['mean_sigma']
+
+    if sort_by_true:
+        order = np.argsort(y_true)
+    else:
+        order = np.arange(len(y_true))
+
+    x = np.arange(len(y_true))
+    y_t = y_true[order]
+    y_m = mean_pred[order]
+    ep = std_pred[order]
+    al = mean_sigma[order]
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Aleatoric band (wider)
+    ax.fill_between(x, y_m - al, y_m + al, alpha=0.2, color='orange',
+                    label='Aleatoric (mean sigma)')
+    # Epistemic band (narrower)
+    ax.fill_between(x, y_m - ep, y_m + ep, alpha=0.35, color='steelblue',
+                    label='Epistemic (MC std)')
+    # MC mean prediction
+    ax.plot(x, y_m, color='steelblue', linewidth=1, label='MC mean prediction')
+    # True values
+    ax.plot(x, y_t, color='red', linewidth=0.8, linestyle='--', label='True age')
+
+    ax.set_xlabel('Sample index (sorted by true age)' if sort_by_true
+                  else 'Sample index', fontsize=12)
+    ax.set_ylabel('Age [log(age/Myr)]', fontsize=12)
+    ax.set_title('MC Dropout Predictions with Uncertainty Bands', fontsize=14,
+                 fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def plot_mc_epistemic_vs_aleatoric(mc_results, figsize=(8, 8)):
+    """
+    Scatter plot of epistemic vs aleatoric uncertainty per sample.
+
+    Parameters
+    ----------
+    mc_results : dict
+        Output of mc_dropout_predict.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, ax
+    """
+    epistemic = mc_results['std_pred']
+    aleatoric = mc_results['mean_sigma']
+    total = mc_results['total_uncertainty']
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    scatter = ax.scatter(aleatoric, epistemic, c=total, cmap='viridis',
+                         alpha=0.6, s=25, edgecolors='none')
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label('Total uncertainty', fontsize=12)
+
+    # Diagonal: equal contribution
+    lim_max = max(aleatoric.max(), epistemic.max()) * 1.05
+    ax.plot([0, lim_max], [0, lim_max], 'k--', linewidth=1, label='Equal contribution')
+
+    # Annotations
+    n_epist_dom = (epistemic > aleatoric).sum()
+    n_aleat_dom = (aleatoric >= epistemic).sum()
+    ax.text(0.95, 0.05,
+            f'Epistemic dominant: {n_epist_dom}\nAleatoric dominant: {n_aleat_dom}',
+            transform=ax.transAxes, fontsize=10, ha='right', va='bottom',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+
+    ax.set_xlabel('Aleatoric uncertainty (mean predicted sigma)', fontsize=12)
+    ax.set_ylabel('Epistemic uncertainty (MC std)', fontsize=12)
+    ax.set_title('Epistemic vs Aleatoric Uncertainty', fontsize=14,
+                 fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, lim_max)
+    ax.set_ylim(0, lim_max)
+    ax.set_aspect('equal', adjustable='box')
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def plot_mc_uncertainty_decomposition(mc_results, figsize=(12, 5)):
+    """
+    Summary visualisation of uncertainty decomposition (2 panels).
+
+    Panel 1: Overlapping histograms of epistemic, aleatoric, and total uncertainty.
+    Panel 2: Box plots showing the distributions side-by-side.
+
+    Parameters
+    ----------
+    mc_results : dict
+        Output of mc_dropout_predict.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    fig, axs
+    """
+    epistemic = mc_results['std_pred']
+    aleatoric = mc_results['mean_sigma']
+    total = mc_results['total_uncertainty']
+
+    fig, axs = plt.subplots(1, 2, figsize=figsize)
+    fig.suptitle('Uncertainty Decomposition Summary', fontsize=14,
+                 fontweight='bold')
+
+    # ---- Panel 1: Histograms ----
+    ax1 = axs[0]
+    bins = np.linspace(0, max(total.max(), aleatoric.max(), epistemic.max()), 40)
+    ax1.hist(epistemic, bins=bins, alpha=0.5, color='steelblue',
+             edgecolor='black', label='Epistemic (MC std)')
+    ax1.hist(aleatoric, bins=bins, alpha=0.5, color='orange',
+             edgecolor='black', label='Aleatoric (mean sigma)')
+    ax1.hist(total, bins=bins, alpha=0.35, color='green',
+             edgecolor='black', label='Total')
+
+    ax1.set_xlabel('Uncertainty', fontsize=12)
+    ax1.set_ylabel('Frequency', fontsize=12)
+    ax1.set_title('Uncertainty Distributions', fontsize=12)
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # ---- Panel 2: Box plots ----
+    ax2 = axs[1]
+    bp = ax2.boxplot([epistemic, aleatoric, total],
+                     labels=['Epistemic', 'Aleatoric', 'Total'],
+                     patch_artist=True, widths=0.5)
+
+    colors = ['steelblue', 'orange', 'green']
+    for patch, c in zip(bp['boxes'], colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.6)
+
+    # Fraction text
+    mean_epist_frac = np.mean(epistemic**2 / (total**2 + 1e-12))
+    mean_aleat_frac = 1.0 - mean_epist_frac
+    ax2.text(0.98, 0.98,
+             f'Mean variance fraction:\n'
+             f'  Epistemic: {mean_epist_frac:.1%}\n'
+             f'  Aleatoric: {mean_aleat_frac:.1%}',
+             transform=ax2.transAxes, fontsize=10,
+             va='top', ha='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+
+    ax2.set_ylabel('Uncertainty', fontsize=12)
+    ax2.set_title('Uncertainty Components', fontsize=12)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
     return fig, axs

@@ -316,13 +316,13 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
     from datetime import datetime
 
     if verbose>2:
-        print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
     elif verbose>1:
         if epoch%10==0:
-            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
     elif verbose>0:
         if epoch%10==0:
-            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
 
     for track, batch in enumerate(train_loader, 1):
         if use_periodogram:
@@ -530,11 +530,11 @@ def log_model_progress(log, model, train_data, valid_data):
 
         #print(np.shape(y_true), np.shape(y_pred), np.shape(sigma_pred), np.shape(data[0]), np.shape(data[1]))
         err, sigma, tot = Loss_Components(y_true, y_pred, sigma_pred)
-        log[label+"errLoss"].append(err)
-        log[label+"sigmaLoss"].append(sigma)
-        log[label+"Loss"].append(tot)
-        log[label+"MAE" ].append(mae(y_true, y_pred))
-        log[label+"RMSE"].append(rmse(y_true, y_pred))
+        log[label+"errLoss"].append(err.item())
+        log[label+"sigmaLoss"].append(sigma.item())
+        log[label+"Loss"].append(tot.item())
+        log[label+"MAE" ].append(mae(y_true, y_pred).item())
+        log[label+"RMSE"].append(rmse(y_true, y_pred).item())
         log[label+"median_sigma"].append(torch.median(sigma_pred).item())
         log[label+"mean_sigma"].append(torch.mean(sigma_pred).item())
         log[label+"Coverage68"].append(coverage(y_true, y_pred, sigma_pred, num_sigma=1.0))
