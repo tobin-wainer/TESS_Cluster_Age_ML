@@ -892,62 +892,93 @@ def plot_mc_dropout_predictions(mc_results, y_true, sort_by_true=True,
     ax.set_title('MC Dropout Predictions with Uncertainty Bands', fontsize=14,
                  fontweight='bold')
     ax.legend(fontsize=10)
+    ax.set_ylim([6, 11])
+    
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     return fig, ax
 
 
-def plot_mc_epistemic_vs_aleatoric(mc_results, figsize=(8, 8)):
+def plot_mc_epistemic_vs_aleatoric(mc_results, figsize=(8, 8),
+                                   log_threshold=10.0, eps=1e-2):
     """
-    Scatter plot of epistemic vs aleatoric uncertainty per sample.
-
-    Parameters
-    ----------
-    mc_results : dict
-        Output of mc_dropout_predict.
-    figsize : tuple
-        Figure size.
-
-    Returns
-    -------
-    fig, ax
+    Scatter plot of epistemic vs aleatoric uncertainty per sample,
+    with automatic log scaling if large outliers are present.
     """
-    epistemic = mc_results['std_pred']
-    aleatoric = mc_results['mean_sigma']
-    total = mc_results['total_uncertainty']
+
+    epistemic = np.asarray(mc_results['std_pred'])
+    aleatoric = np.asarray(mc_results['mean_sigma'])
+    total = np.asarray(mc_results['total_uncertainty'])
+
+    # --- Auto-detect need for log scale ---
+    ep_ratio = np.nanmax(epistemic) / np.nanmedian(epistemic)
+    al_ratio = np.nanmax(aleatoric) / np.nanmedian(aleatoric)
+    use_log = (ep_ratio > log_threshold) or (al_ratio > log_threshold)
+
+    # --- Protect against zeros ---
+    epistemic_p = np.clip(epistemic, eps, None)
+    aleatoric_p = np.clip(aleatoric, eps, None)
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    scatter = ax.scatter(aleatoric, epistemic, c=total, cmap='viridis',
-                         alpha=0.6, s=25, edgecolors='none')
+    scatter = ax.scatter(
+        aleatoric_p, epistemic_p,
+        c=total, cmap='viridis',
+        alpha=0.6, s=25, edgecolors='none'
+    )
+
     cbar = plt.colorbar(scatter, ax=ax)
     cbar.set_label('Total uncertainty', fontsize=12)
 
-    # Diagonal: equal contribution
-    lim_max = max(aleatoric.max(), epistemic.max()) * 1.05
-    ax.plot([0, lim_max], [0, lim_max], 'k--', linewidth=1, label='Equal contribution')
+    # --- Robust limits (avoid single crazy outlier) ---
+    lo = min(np.percentile(aleatoric_p, 1),
+             np.percentile(epistemic_p, 1))
+    hi = max(np.percentile(aleatoric_p, 99),
+             np.percentile(epistemic_p, 99))
 
-    # Annotations
+    lo = max(lo, eps)
+    hi *= 1.1
+
+    # --- Diagonal: equal contribution ---
+    ax.plot([lo, hi], [lo, hi],
+            'k--', linewidth=1, label='Equal contribution')
+
+    # --- Dominance counts (linear comparison, not log) ---
     n_epist_dom = (epistemic > aleatoric).sum()
     n_aleat_dom = (aleatoric >= epistemic).sum()
-    ax.text(0.95, 0.05,
-            f'Epistemic dominant: {n_epist_dom}\nAleatoric dominant: {n_aleat_dom}',
-            transform=ax.transAxes, fontsize=10, ha='right', va='bottom',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
 
+    ax.text(
+        0.95, 0.05,
+        f'Epistemic dominant: {n_epist_dom}\n'
+        f'Aleatoric dominant: {n_aleat_dom}',
+        transform=ax.transAxes, fontsize=10,
+        ha='right', va='bottom',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7)
+    )
+
+    # --- Axes ---
     ax.set_xlabel('Aleatoric uncertainty (mean predicted sigma)', fontsize=12)
     ax.set_ylabel('Epistemic uncertainty (MC std)', fontsize=12)
-    ax.set_title('Epistemic vs Aleatoric Uncertainty', fontsize=14,
-                 fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, lim_max)
-    ax.set_ylim(0, lim_max)
+    ax.set_title(
+        'Epistemic vs Aleatoric Uncertainty'
+        + (' (log scale)' if use_log else ''),
+        fontsize=14, fontweight='bold'
+    )
+
+    if use_log:
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
     ax.set_aspect('equal', adjustable='box')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, which='both')
 
     plt.tight_layout()
     return fig, ax
+
 
 
 def plot_mc_uncertainty_decomposition(mc_results, figsize=(12, 5)):

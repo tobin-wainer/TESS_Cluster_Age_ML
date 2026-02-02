@@ -490,8 +490,8 @@ def Plot_2d_Statistics(config_dict, x_param, y_param,
                 model = run["model"]
 
             model.eval()
-            X = X_test
-            Y = y_test
+            # X = X_test
+            # Y = y_true
             #X = X_train
             #Y = y_train
 
@@ -571,7 +571,8 @@ def Plot2Dstatistics_wrapper(all_runs_log, x_param, y_param,
     
     SumStats_list = []    
     flattened_name_list = []
-    for i, model_name in enumerate(model_names):
+    i=0
+    for model_name, runs in all_runs_log.items():
         #X_train, X_test, y_train, y_test, X_test_BDATA, y_test_BDATA, ATTRIBUTES, SCALER, POLY_SCALER = model_data[i]
     
         stat_func_list = [mae, rmse, mean_normalized_error, negative_log_likelihood, z_score_ks_test, median_sigma2, min_sigma2]
@@ -582,15 +583,16 @@ def Plot2Dstatistics_wrapper(all_runs_log, x_param, y_param,
     
         Plot_2d_Statistics(
             config_dict=all_runs_log[model_name],
-            x_param="lr",
-            y_param="dropout_prob",
+            x_param=x_param,
+            y_param=y_param,
             X_test=(X, X_period),
             y_true=Y,
             stat_func_list=stat_func_list,
             stat_names=stat_names,
             k_id=k_id
         )
-
+        i+=1
+        
     return
     
     #PlotSummaryStats(SumStats_list, flattened_name_list)
