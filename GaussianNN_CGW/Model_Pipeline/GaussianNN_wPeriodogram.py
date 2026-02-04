@@ -116,7 +116,7 @@ class DualInputNN(nn.Module):
             log_sigma_pred = self.fc_log_sigma(combined)
             sigma_pred = torch.exp(log_sigma_pred)
         else:
-            sigma_pred = torch.ones_like(y_pred)*0.1  # dummy sigma=1
+            sigma_pred = torch.ones_like(y_pred)*0.01  # dummy sigma=1
 
         return y_pred, sigma_pred
 

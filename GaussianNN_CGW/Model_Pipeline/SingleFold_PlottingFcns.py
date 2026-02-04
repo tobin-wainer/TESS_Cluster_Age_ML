@@ -465,45 +465,50 @@ import numpy as np
 import matplotlib.colors as mcolors
 
 
-def _get_kfold_array(run_data, metric_key):
-    """Extract a metric from all folds as a [n_folds, n_epochs] array."""
-    arrays = []
-    for k, v in run_data.items():
-        if isinstance(k, int):
-            arrays.append(v['log'][metric_key])
-    return np.array(arrays)
-
-
 def plot_2d_statistics(
-    config_dict,
+    all_runs_log,
     x_param,
     y_param,
-    log_metrics,
+    log_metrics=None,
     fold_agg='median',
     epoch_select='best',
     lam=0.5,
-    figsize=(6, 5),
+    figsize=(16, 12),
+    ncols=3,
 ):
     """Plot 2D heatmaps of training-log metrics aggregated across k-folds.
 
+    Creates a single figure with subplots for each metric, for each model.
+
     Parameters
     ----------
-    config_dict : dict
-        all_runs_log[model_name] — mapping of {run_id: run_data}.
+    all_runs_log : dict
+        Top-level log dict: {model_name: {run_id: run_data}}.
     x_param, y_param : str
         Hyperparameter names for the x and y axes.
-    log_metrics : list of str
+    log_metrics : list of str or None
         Training log keys to plot (e.g. ['valid_MAE', 'valid_RMSE']).
+        Defaults to a standard set of validation metrics.
     fold_agg : str
         How to aggregate across folds: 'median', 'mean', 'min', or 'max'.
+        Works with n_folds=1 (single fold just returns that fold's value).
     epoch_select : str
         'best' selects the epoch minimising mean_loss + lam*std_loss across
         folds; 'final' uses the last epoch.
     lam : float
         Stability penalty weight for best-epoch selection.
     figsize : tuple
-        Figure size per plot.
+        Figure size for the entire subplot grid.
+    ncols : int
+        Number of columns in the subplot grid.
     """
+    if log_metrics is None:
+        log_metrics = [
+            'valid_MAE', 'valid_RMSE', 'valid_Loss',
+            'valid_median_sigma', 'valid_Coverage68',
+            'valid_Coverage95', 'valid_CRPS',
+        ]
+
     agg_funcs = {
         'median': np.nanmedian,
         'mean': np.nanmean,
@@ -512,101 +517,168 @@ def plot_2d_statistics(
     }
     agg_fn = agg_funcs[fold_agg]
 
-    x_vals = sorted(set(run["params"][x_param] for run in config_dict.values()))
-    y_vals = sorted(set(run["params"][y_param] for run in config_dict.values()))
-    x_map = {v: i for i, v in enumerate(x_vals)}
-    y_map = {v: i for i, v in enumerate(y_vals)}
+    def _get_kfold_array(run_data, metric_key):
+        """Extract a metric from all folds as a [n_folds, n_epochs] array."""
+        arrays = []
+        for k, v in run_data.items():
+            if isinstance(k, int) and metric_key in v.get('log', {}):
+                arr = v['log'][metric_key]
+                if len(arr) > 0:
+                    arrays.append(arr)
+        if not arrays:
+            return None
+        # Align to shortest fold
+        min_len = min(len(a) for a in arrays)
+        if min_len == 0:
+            return None
+        return np.array([a[:min_len] for a in arrays])
 
-    for metric_key in log_metrics:
-        Z = np.full((len(y_vals), len(x_vals)), np.nan)
+    for model_name, runs in all_runs_log.items():
+        print(f"--- {model_name} ---")
 
-        for run in config_dict.values():
-            metric_folds = _get_kfold_array(run, metric_key)  # [n_folds, n_epochs]
+        # Get unique parameter values
+        x_vals = sorted(set(run["params"][x_param] for run in runs.values()))
+        y_vals = sorted(set(run["params"][y_param] for run in runs.values()))
+        x_map = {v: i for i, v in enumerate(x_vals)}
+        y_map = {v: i for i, v in enumerate(y_vals)}
 
-            if epoch_select == 'best':
-                loss_folds = _get_kfold_array(run, 'valid_Loss')
-                mean_loss = np.nanmean(loss_folds, axis=0)
-                std_loss = np.nanstd(loss_folds, axis=0)
-                epoch_idx = int(np.nanargmin(mean_loss + lam * std_loss))
+        # Calculate subplot grid dimensions
+        n_metrics = len(log_metrics)
+        nrows = int(np.ceil(n_metrics / ncols))
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        fig.suptitle(f"{model_name}: {x_param} vs {y_param} ({fold_agg}, epoch={epoch_select})",
+                     fontsize=14, y=1.02)
+
+        for idx, metric_key in enumerate(log_metrics):
+            row, col = divmod(idx, ncols)
+            ax = axes[row, col]
+
+            Z = np.full((len(y_vals), len(x_vals)), np.nan)
+
+            for run in runs.values():
+                metric_folds = _get_kfold_array(run, metric_key)
+                if metric_folds is None:
+                    continue
+
+                if epoch_select == 'best':
+                    loss_folds = _get_kfold_array(run, 'valid_Loss')
+                    if loss_folds is None:
+                        continue
+                    mean_loss = np.nanmean(loss_folds, axis=0)
+                    std_loss = np.nanstd(loss_folds, axis=0)
+                    combined = mean_loss + lam * std_loss
+                    if np.all(np.isnan(combined)):
+                        continue
+                    epoch_idx = int(np.nanargmin(combined))
+                else:
+                    epoch_idx = -1
+
+                # Handle case where epoch_idx is out of bounds
+                if epoch_idx >= metric_folds.shape[1]:
+                    epoch_idx = metric_folds.shape[1] - 1
+
+                fold_values = metric_folds[:, epoch_idx]
+                agg_val = float(agg_fn(fold_values))
+
+                x_i = x_map[run["params"][x_param]]
+                y_i = y_map[run["params"][y_param]]
+                Z[y_i, x_i] = agg_val
+
+            # Transform coverage metrics to show deviation from target
+            display_title = metric_key
+            if metric_key == 'valid_Coverage68':
+                Z = Z - 0.68
+                display_title = 'valid_Coverage68 - 0.68'
+            elif metric_key == 'valid_Coverage95':
+                Z = Z - 0.95
+                display_title = 'valid_Coverage95 - 0.95'
+
+            # Determine color normalization based on metric type
+            valid_vals = Z[~np.isnan(Z)]
+            if valid_vals.size == 0:
+                norm = None
+                cmap = 'viridis'
+            elif metric_key == 'valid_Loss':
+                # SymLog for loss (can go negative)
+                abs_max = max(abs(np.nanmin(valid_vals)), abs(np.nanmax(valid_vals)), 1e-3)
+                norm = mcolors.SymLogNorm(linthresh=0.1, linscale=1, vmin=-abs_max, vmax=abs_max)
+                cmap = 'viridis'
+            elif metric_key in ['valid_Coverage68', 'valid_Coverage95']:
+                # SymLog for coverage deviation (centered at 0)
+                abs_max = max(abs(np.nanmin(valid_vals)), abs(np.nanmax(valid_vals)), 1e-3)
+                abs_max = min(abs_max, 1.0)  # Cap at 1
+                norm = mcolors.SymLogNorm(linthresh=0.01, linscale=1, vmin=-abs_max, vmax=abs_max)
+                cmap = 'RdBu_r'
+            elif metric_key in ['valid_MAE', 'valid_RMSE', 'valid_median_sigma', 'valid_CRPS']:
+                # Cap max at 10 for these metrics
+                positive = valid_vals[valid_vals > 0]
+                if positive.size == 0:
+                    norm = None
+                else:
+                    norm = mcolors.LogNorm(
+                        vmin=np.nanmin(positive),
+                        vmax=min(np.nanmax(positive), 2),
+                    )
+                cmap = 'viridis'
             else:
-                epoch_idx = -1
+                # Default: LogNorm for other positive metrics
+                positive = valid_vals[valid_vals > 0]
+                if positive.size == 0:
+                    norm = None
+                else:
+                    norm = mcolors.LogNorm(
+                        vmin=np.nanmin(positive),
+                        vmax=min(np.nanmax(valid_vals), 1e20),
+                    )
+                cmap = 'viridis'
 
-            fold_values = metric_folds[:, epoch_idx]
-            agg_val = float(agg_fn(fold_values))
+            im = ax.imshow(Z, origin='lower', aspect='auto', cmap=cmap, norm=norm)
+            fig.colorbar(im, ax=ax, shrink=0.8)
 
-            x_i = x_map[run["params"][x_param]]
-            y_i = y_map[run["params"][y_param]]
-            Z[y_i, x_i] = agg_val
+            x_labels = [f"{x:.3g}" if isinstance(x, float) else str(x) for x in x_vals]
+            y_labels = [f"{y:.3g}" if isinstance(y, float) else str(y) for y in y_vals]
+            ax.set_xticks(np.arange(len(x_vals)))
+            ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+            ax.set_yticks(np.arange(len(y_vals)))
+            ax.set_yticklabels(y_labels, fontsize=8)
 
-        plt.figure(figsize=figsize)
+            # Add text annotations
+            for yi in range(len(y_vals)):
+                for xi in range(len(x_vals)):
+                    val = Z[yi, xi]
+                    if not np.isnan(val):
+                        # Determine text color based on background
+                        if norm is not None:
+                            try:
+                                norm_val = norm(val)
+                                # For diverging colormaps, use dark text near center
+                                if cmap == 'RdBu_r':
+                                    text_color = "black" if 0.3 < norm_val < 0.7 else "white"
+                                else:
+                                    text_color = "white" if norm_val < 0.5 else "black"
+                            except (ValueError, ZeroDivisionError):
+                                text_color = "black"
+                        else:
+                            text_color = "black"
+                        ax.text(xi, yi, f"{val:.2g}", ha="center", va="center",
+                                color=text_color, fontsize=7)
 
-        positive = Z[Z > 0]
-        if positive.size == 0:
-            norm = None
-        else:
-            norm = mcolors.LogNorm(
-                vmin=np.nanmin(positive),
-                vmax=min(np.nanmax(Z), 1e20),
-            )
+            ax.set_xlabel(x_param, fontsize=9)
+            ax.set_ylabel(y_param, fontsize=9)
+            ax.set_title(display_title, fontsize=10)
 
-        im = plt.imshow(Z, origin='lower', aspect='auto', cmap='viridis', norm=norm)
-        plt.colorbar(im, label=metric_key)
+        # Hide unused subplots
+        for idx in range(n_metrics, nrows * ncols):
+            row, col = divmod(idx, ncols)
+            axes[row, col].axis('off')
 
-        x_labels = [f"{x:.3g}" if isinstance(x, float) else str(x) for x in x_vals]
-        y_labels = [f"{y:.3g}" if isinstance(y, float) else str(y) for y in y_vals]
-        plt.xticks(ticks=np.arange(len(x_vals)), labels=x_labels, rotation=45, ha='right')
-        plt.yticks(ticks=np.arange(len(y_vals)), labels=y_labels)
-
-        for yi in range(len(y_vals)):
-            for xi in range(len(x_vals)):
-                val = Z[yi, xi]
-                if not np.isnan(val) and norm is not None:
-                    text_color = "white" if norm(val) < 0.5 else "black"
-                    plt.text(xi, yi, f"{val:.2g}", ha="center", va="center",
-                             color=text_color, fontsize=8)
-
-        plt.xlabel(x_param)
-        plt.ylabel(y_param)
-        plt.title(f"{metric_key} vs {x_param} & {y_param}\n({fold_agg}, epoch={epoch_select})")
         plt.tight_layout()
         plt.show()
 
 
-def plot_2d_statistics_wrapper(
-    all_runs_log, x_param, y_param,
-    log_metrics=None,
-    fold_agg='median',
-    epoch_select='best',
-    lam=0.5,
-    **kwargs,
-):
-    """Convenience wrapper that plots log-based 2D heatmaps for every model.
-
-    Parameters
-    ----------
-    all_runs_log : dict
-        Top-level log dict: {model_name: {run_id: run_data}}.
-    log_metrics : list of str or None
-        Metrics to plot. Defaults to a standard set of validation metrics.
-    """
-    if log_metrics is None:
-        log_metrics = [
-            'valid_MAE', 'valid_RMSE', 'valid_Loss',
-            'valid_median_sigma', 'valid_Coverage68',
-            'valid_Coverage95', 'valid_CRPS',
-        ]
-    for model_name, runs in all_runs_log.items():
-        print(f"--- {model_name} ---")
-        plot_2d_statistics(
-            config_dict=runs,
-            x_param=x_param,
-            y_param=y_param,
-            log_metrics=log_metrics,
-            fold_agg=fold_agg,
-            epoch_select=epoch_select,
-            lam=lam,
-            **kwargs,
-        )
+# Backwards compatibility alias
+plot_2d_statistics_wrapper = plot_2d_statistics
 
 
 
