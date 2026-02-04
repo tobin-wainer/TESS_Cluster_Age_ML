@@ -462,140 +462,151 @@ def print_and_plot_summary_stats(model_names,
 
 import matplotlib.pyplot as plt
 import numpy as np
-import inspect
-import matplotlib.colors as mcolors  # Make sure this import is at the top
+import matplotlib.colors as mcolors
 
-def Plot_2d_Statistics(config_dict, x_param, y_param, 
-                       stat_func_list=None, stat_names=None, X_test=None, y_true=None,
-                       k_id=None):
-    
-    if stat_func_list is None:
-        stat_func_list = [mae, rmse]
-    if stat_names is None:
-        stat_names = [f.__name__ for f in stat_func_list]
+
+def _get_kfold_array(run_data, metric_key):
+    """Extract a metric from all folds as a [n_folds, n_epochs] array."""
+    arrays = []
+    for k, v in run_data.items():
+        if isinstance(k, int):
+            arrays.append(v['log'][metric_key])
+    return np.array(arrays)
+
+
+def plot_2d_statistics(
+    config_dict,
+    x_param,
+    y_param,
+    log_metrics,
+    fold_agg='median',
+    epoch_select='best',
+    lam=0.5,
+    figsize=(6, 5),
+):
+    """Plot 2D heatmaps of training-log metrics aggregated across k-folds.
+
+    Parameters
+    ----------
+    config_dict : dict
+        all_runs_log[model_name] — mapping of {run_id: run_data}.
+    x_param, y_param : str
+        Hyperparameter names for the x and y axes.
+    log_metrics : list of str
+        Training log keys to plot (e.g. ['valid_MAE', 'valid_RMSE']).
+    fold_agg : str
+        How to aggregate across folds: 'median', 'mean', 'min', or 'max'.
+    epoch_select : str
+        'best' selects the epoch minimising mean_loss + lam*std_loss across
+        folds; 'final' uses the last epoch.
+    lam : float
+        Stability penalty weight for best-epoch selection.
+    figsize : tuple
+        Figure size per plot.
+    """
+    agg_funcs = {
+        'median': np.nanmedian,
+        'mean': np.nanmean,
+        'min': np.nanmin,
+        'max': np.nanmax,
+    }
+    agg_fn = agg_funcs[fold_agg]
 
     x_vals = sorted(set(run["params"][x_param] for run in config_dict.values()))
     y_vals = sorted(set(run["params"][y_param] for run in config_dict.values()))
     x_map = {v: i for i, v in enumerate(x_vals)}
     y_map = {v: i for i, v in enumerate(y_vals)}
 
-    for i_stat, (stat_func, stat_name) in enumerate(zip(stat_func_list, stat_names)):
+    for metric_key in log_metrics:
         Z = np.full((len(y_vals), len(x_vals)), np.nan)
-        
+
         for run in config_dict.values():
-            
-            if k_id is not None:
-                model = run[k_id]["model"]
+            metric_folds = _get_kfold_array(run, metric_key)  # [n_folds, n_epochs]
+
+            if epoch_select == 'best':
+                loss_folds = _get_kfold_array(run, 'valid_Loss')
+                mean_loss = np.nanmean(loss_folds, axis=0)
+                std_loss = np.nanstd(loss_folds, axis=0)
+                epoch_idx = int(np.nanargmin(mean_loss + lam * std_loss))
             else:
-                model = run["model"]
+                epoch_idx = -1
 
-            model.eval()
-            # X = X_test
-            # Y = y_true
-            #X = X_train
-            #Y = y_train
+            fold_values = metric_folds[:, epoch_idx]
+            agg_val = float(agg_fn(fold_values))
 
-            with torch.no_grad():
-                y_pred, sigma = model(X_test[0], X_test[1])
+            x_i = x_map[run["params"][x_param]]
+            y_i = y_map[run["params"][y_param]]
+            Z[y_i, x_i] = agg_val
 
-                # Get how many args this function wants
-                n_args = len(inspect.signature(stat_func).parameters)
+        plt.figure(figsize=figsize)
 
-                # Compute stat value with the correct number of arguments
-                if n_args == 1:
-                    stat_val = stat_func(sigma)
-                elif n_args == 2:
-                    stat_val = stat_func(y_true, y_pred)
-                elif n_args == 3:
-                    stat_val = stat_func(y_true, y_pred, sigma)
-                else:
-                    raise ValueError(f"{stat_func.__name__} expects {n_args} args. Not supported.")
+        positive = Z[Z > 0]
+        if positive.size == 0:
+            norm = None
+        else:
+            norm = mcolors.LogNorm(
+                vmin=np.nanmin(positive),
+                vmax=min(np.nanmax(Z), 1e20),
+            )
 
-                # Handle case where result is a tuple (like from kstest)
-                if isinstance(stat_val, tuple):
-                    # Default: extract p-value (2nd value)
-                    stat_val = stat_val[0]
+        im = plt.imshow(Z, origin='lower', aspect='auto', cmap='viridis', norm=norm)
+        plt.colorbar(im, label=metric_key)
 
-                x_i = x_map[run["params"][x_param]]
-                y_i = y_map[run["params"][y_param]]
-                Z[y_i, x_i] = stat_val.item() if hasattr(stat_val, 'item') else stat_val
-
-        # Plot Z with plt.imshow or similar (not included here)
-
-        plt.figure(figsize=(6, 5))
-        print(np.nanmin(Z[Z > 0]), np.nanmax(Z))
-        
-        norm = mcolors.LogNorm(vmin=np.nanmin(Z[Z > 0]), vmax=np.min([np.nanmax(Z), 1e20]))
-        
-        im = plt.imshow(
-            Z,
-            origin='lower',
-            aspect='auto',
-            cmap='viridis',
-            norm=norm
-        )
-
-        plt.colorbar(im, label=stat_names[i_stat])
-
-        # Axis ticks and labels (formatted)
         x_labels = [f"{x:.3g}" if isinstance(x, float) else str(x) for x in x_vals]
         y_labels = [f"{y:.3g}" if isinstance(y, float) else str(y) for y in y_vals]
         plt.xticks(ticks=np.arange(len(x_vals)), labels=x_labels, rotation=45, ha='right')
         plt.yticks(ticks=np.arange(len(y_vals)), labels=y_labels)
 
-        # Annotations inside cells
-        for y_i in range(len(y_vals)):
-            for x_i in range(len(x_vals)):
-                val = Z[y_i, x_i]
-                if not np.isnan(val):
+        for yi in range(len(y_vals)):
+            for xi in range(len(x_vals)):
+                val = Z[yi, xi]
+                if not np.isnan(val) and norm is not None:
                     text_color = "white" if norm(val) < 0.5 else "black"
-                    plt.text(x_i, y_i, f"{val:.2g}", ha="center", va="center", color=text_color, fontsize=8)
+                    plt.text(xi, yi, f"{val:.2g}", ha="center", va="center",
+                             color=text_color, fontsize=8)
 
         plt.xlabel(x_param)
         plt.ylabel(y_param)
-        plt.title(f"{stat_names[i_stat]} vs {x_param} & {y_param}")
+        plt.title(f"{metric_key} vs {x_param} & {y_param}\n({fold_agg}, epoch={epoch_select})")
         plt.tight_layout()
         plt.show()
 
 
-def Plot2Dstatistics_wrapper(all_runs_log, x_param, y_param, 
-                             model_data_statistics, model_data_periodogram, model_data_Y, 
-                             k_id=None):
-    """ 
-    Function plots an 2d grid plot where the x and y axis represent models with different parameter values of the specified
-    x_param and y_param hyperparameters.
+def plot_2d_statistics_wrapper(
+    all_runs_log, x_param, y_param,
+    log_metrics=None,
+    fold_agg='median',
+    epoch_select='best',
+    lam=0.5,
+    **kwargs,
+):
+    """Convenience wrapper that plots log-based 2D heatmaps for every model.
 
-    The plot will be a #_xparam by #_yparam grid with each cell colored by that models performce of a specific test_statistic.
-    there will be n_plots, where n is the length of the stat_func_list defined below.
+    Parameters
+    ----------
+    all_runs_log : dict
+        Top-level log dict: {model_name: {run_id: run_data}}.
+    log_metrics : list of str or None
+        Metrics to plot. Defaults to a standard set of validation metrics.
     """
-    
-    SumStats_list = []    
-    flattened_name_list = []
-    i=0
+    if log_metrics is None:
+        log_metrics = [
+            'valid_MAE', 'valid_RMSE', 'valid_Loss',
+            'valid_median_sigma', 'valid_Coverage68',
+            'valid_Coverage95', 'valid_CRPS',
+        ]
     for model_name, runs in all_runs_log.items():
-        #X_train, X_test, y_train, y_test, X_test_BDATA, y_test_BDATA, ATTRIBUTES, SCALER, POLY_SCALER = model_data[i]
-    
-        stat_func_list = [mae, rmse, mean_normalized_error, negative_log_likelihood, z_score_ks_test, median_sigma2, min_sigma2]
-        stat_names = ["MAE", "RMSE", "MNE", "NLL", 'KsStat', 'Median Sigma', 'Min Sigma']
-        #X, X_period, Y = model_train_data_statistics[i], model_train_data_periodogram[i], model_train_data_Y[i] 
-        X, X_period, Y = model_data_statistics[i], model_data_periodogram[i], model_data_Y[i] 
-        #X, X_period, Y = model_valid_data_statistics[i], model_valid_data_periodogram[i], model_valid_data_Y[i] 
-    
-        Plot_2d_Statistics(
-            config_dict=all_runs_log[model_name],
+        print(f"--- {model_name} ---")
+        plot_2d_statistics(
+            config_dict=runs,
             x_param=x_param,
             y_param=y_param,
-            X_test=(X, X_period),
-            y_true=Y,
-            stat_func_list=stat_func_list,
-            stat_names=stat_names,
-            k_id=k_id
+            log_metrics=log_metrics,
+            fold_agg=fold_agg,
+            epoch_select=epoch_select,
+            lam=lam,
+            **kwargs,
         )
-        i+=1
-        
-    return
-    
-    #PlotSummaryStats(SumStats_list, flattened_name_list)
 
 
 
