@@ -129,6 +129,56 @@ def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val
             scaler, y_mean, mean_peak_strength)
 
 
+def oversample_to_uniform(X, period, y, indices, n_bins=20):
+    """
+    Oversample training data to create a more uniform target distribution.
+
+    Duplicates samples from sparse bins so each bin has roughly equal representation.
+    Uses the maximum bin count as the target, replicating samples proportionally.
+
+    Parameters:
+    -----------
+    X : torch.Tensor - Summary statistics (N, features)
+    period : torch.Tensor or None - Periodogram data (N, freqs)
+    y : torch.Tensor - Target values (N, 1)
+    indices : torch.Tensor - Original sample indices for tracking
+    n_bins : int - Number of bins for computing distribution
+
+    Returns:
+    --------
+    X_over, period_over, y_over, indices_over : Oversampled tensors
+    """
+    y_np = y.cpu().numpy().flatten()
+
+    # Compute histogram to get bin counts
+    hist, bin_edges = np.histogram(y_np, bins=n_bins)
+
+    # Find which bin each sample belongs to
+    bin_indices = np.digitize(y_np, bin_edges[:-1]) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+    # Compute replication factor for each sample
+    # Target: make each bin have count equal to the max bin
+    max_count = hist.max()
+
+    # Each sample gets replicated ceil(max_count / bin_count) times
+    # This ensures sparse bins are upsampled to match dense bins
+    replications = np.ceil(max_count / (hist[bin_indices] + 1e-6)).astype(int)
+    replications = torch.tensor(replications, dtype=torch.long)
+
+    # Use repeat_interleave to duplicate samples
+    X_over = torch.repeat_interleave(X, replications, dim=0)
+    y_over = torch.repeat_interleave(y, replications, dim=0)
+    indices_over = torch.repeat_interleave(indices, replications, dim=0)
+
+    if period is not None:
+        period_over = torch.repeat_interleave(period, replications, dim=0)
+    else:
+        period_over = None
+
+    return X_over, period_over, y_over, indices_over
+
+
 # ==============================================================================
 # Loss Function
 # ==============================================================================
@@ -177,6 +227,12 @@ class GaussianNLLLoss_ME(nn.Module):
        # plt.show()
 
         return nll.mean()
+
+
+class MSELossWrapper(nn.Module):
+    """MSE loss that ignores sigma_pred for compatibility with training loop."""
+    def forward(self, y_pred, y_true, sigma_pred=None):
+        return torch.mean((y_true - y_pred) ** 2)
 
 
 def sanitize_batch(y_pred, sigma_pred, clip_sigma=(1e-7, 100.0), clip_pred=(-1000.0, 1000.0)):
@@ -412,15 +468,24 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     # Create index tensor for tracking original sample indices (for gradient debug output)
     indices = torch.arange(len(X_train))
 
-    if use_periodogram:
-        train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
-    else:
-        train_dataset = TensorDataset(X_train, y_train, indices)
+    # Check if manual oversampling is requested for uniform age distribution
+    if params.get('oversample_uniform', False):
+        n_bins = params.get('oversample_bins', 20)
+        X_train_os, Period_train_os, y_train_os, indices_os = oversample_to_uniform(
+            X_train, Period_train, y_train, indices, n_bins=n_bins
+        )
 
-    # Configure DataLoader using settings from pipeline_config
-    # GPU: pin_memory=True for faster host->GPU transfer
-    # CPU: pin_memory=False
-    # num_workers from config (0 on WSL due to multiprocessing issues)
+        if use_periodogram:
+            train_dataset = TensorDataset(X_train_os, Period_train_os, y_train_os, indices_os)
+        else:
+            train_dataset = TensorDataset(X_train_os, y_train_os, indices_os)
+    else:
+        if use_periodogram:
+            train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
+        else:
+            train_dataset = TensorDataset(X_train, y_train, indices)
+
+    # DataLoader with regular shuffle (oversampling already done if requested)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -430,7 +495,10 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     )
 
     # Define Loss Fcn and Optimizer
-    loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
+    if params.get('learn_sigma', True):
+        loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
+    else:
+        loss_fn = MSELossWrapper()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # Best model tracking (only if requested)
