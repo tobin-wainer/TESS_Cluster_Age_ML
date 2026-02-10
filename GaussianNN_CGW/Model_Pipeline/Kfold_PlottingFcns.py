@@ -222,16 +222,22 @@ def get_param_label(all_param_dicts, current_params):
     return ", ".join(pieces)
 
 
-def plot_all_metric_evolution(all_runs_log, 
-                               specific_lr=None, specific_batchsize=None, specific_dropout=None,
+def plot_all_metric_evolution(all_runs_log,
+                               fix_params=None,
                                use_minmax_spread=False,
                                k_fold=True
     ):
-    ''' 
-    This will plot all the models as the metrics listed below vs. epoch using the median value of all k-folds 
-    and the std of the kfolds as error bars. 
-    the specific_x inputs will make sure that only models with that specific value of that parameter are plotting,
-    useful for visualizing a subselection of models when you have a large grid of models across parameter space.
+    '''
+    This will plot all the models as the metrics listed below vs. epoch using the median value of all k-folds
+    and the std of the kfolds as error bars.
+
+    Parameters
+    ----------
+    fix_params : dict or None
+        Pin hyperparameters to specific values, e.g.
+        ``{'lr': 0.001, 'batch_size': 64, 'dropout_prob': 0.1}``.
+        Runs whose params don't match are skipped.
+        Default is None (no filtering).
     '''
 
     if not k_fold:
@@ -293,12 +299,15 @@ def plot_all_metric_evolution(all_runs_log,
                 print('Run_id', run_id)
                 params = run_data["params"]
 
-                if (specific_lr!=None) and (params['lr']!=specific_lr):
-                    continue
-                if (specific_batchsize!=None) and (params['batch_size']!=specific_batchsize):
-                    continue
-                if (specific_dropout!=None) and (params['dropout_prob']!=specific_dropout):
-                    continue
+                # Skip runs that don't match fixed parameter values
+                if fix_params is not None:
+                    skip = False
+                    for fp_key, fp_val in fix_params.items():
+                        if params.get(fp_key) != fp_val:
+                            skip = True
+                            break
+                    if skip:
+                        continue
 
                 color = next(color_cycle)
                 label = get_param_label(all_param_dicts, params)
@@ -344,14 +353,17 @@ def plot_all_metric_evolution(all_runs_log,
 
                         axs[metric_id].plot(x, y_min_line, color=color, linestyle='--', linewidth=1)
                         axs[metric_id].plot(x, y_max_line, color=color, linestyle='--', linewidth=1)
+                        y_lowest = y_min_line
                     else:
                         # --- STD shaded region ---
                         y_upper = y + y_std
                         y_lower = y - y_std
                         axs[metric_id].fill_between(x, y_lower, y_upper, color=color, alpha=0.3)
-                    
-                    if np.any(y<=0): #change from log to linear scale if the metric goes negative
-                        axs[metric_id].set_yscale('symlog')
+                        y_lowest = y_lower
+
+                    # Switch to symlog if median or error bars go negative
+                    if np.any(y_lowest <= 0) or np.any(y <= 0):
+                        axs[metric_id].set_yscale('symlog', linthresh=0.1, linscale=0.1)
 
                     y_min = np.min(y) - 1
                     y_max = np.max(y) * 2
