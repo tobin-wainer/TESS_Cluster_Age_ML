@@ -129,6 +129,92 @@ def apply_preprocessing(X_train, X_val, period_train, period_val, y_train, y_val
             scaler, y_mean, mean_peak_strength)
 
 
+def oversample_to_uniform(X, period, y, indices, n_bins=20):
+    """
+    Oversample training data to create a more uniform target distribution.
+
+    Duplicates samples from sparse bins so each bin has roughly equal representation.
+    Uses the maximum bin count as the target, replicating samples proportionally.
+
+    Parameters:
+    -----------
+    X : torch.Tensor - Summary statistics (N, features)
+    period : torch.Tensor or None - Periodogram data (N, freqs)
+    y : torch.Tensor - Target values (N, 1)
+    indices : torch.Tensor - Original sample indices for tracking
+    n_bins : int - Number of bins for computing distribution
+
+    Returns:
+    --------
+    X_over, period_over, y_over, indices_over : Oversampled tensors
+    """
+    y_np = y.cpu().numpy().flatten()
+
+    # Compute histogram to get bin counts
+    hist, bin_edges = np.histogram(y_np, bins=n_bins)
+
+    # Find which bin each sample belongs to
+    bin_indices = np.digitize(y_np, bin_edges[:-1]) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+    # Compute replication factor for each sample
+    # Target: make each bin have count equal to the max bin
+    max_count = hist.max()
+
+    # Each sample gets replicated ceil(max_count / bin_count) times
+    # This ensures sparse bins are upsampled to match dense bins
+    replications = np.ceil(max_count / (hist[bin_indices] + 1e-6)).astype(int)
+    replications = torch.tensor(replications, dtype=torch.long)
+
+    # Use repeat_interleave to duplicate samples
+    X_over = torch.repeat_interleave(X, replications, dim=0)
+    y_over = torch.repeat_interleave(y, replications, dim=0)
+    indices_over = torch.repeat_interleave(indices, replications, dim=0)
+
+    if period is not None:
+        period_over = torch.repeat_interleave(period, replications, dim=0)
+    else:
+        period_over = None
+
+    return X_over, period_over, y_over, indices_over
+
+
+def plot_oversample_distribution(y_original, y_oversampled, n_bins=20):
+    """
+    Plot histogram comparing original vs oversampled age distributions.
+
+    Parameters:
+    -----------
+    y_original : torch.Tensor - Original target values
+    y_oversampled : torch.Tensor - Oversampled target values
+    n_bins : int - Number of bins for histogram
+    """
+    y_orig_np = y_original.cpu().numpy().flatten()
+    y_over_np = y_oversampled.cpu().numpy().flatten()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Use same bin edges for both histograms
+    bin_edges = np.linspace(min(y_orig_np.min(), y_over_np.min()),
+                            max(y_orig_np.max(), y_over_np.max()),
+                            n_bins * 2)
+
+    # Original distribution
+    axes[0].hist(y_orig_np, bins=bin_edges, edgecolor='black', alpha=0.7)
+    axes[0].set_title(f'Original Distribution (N={len(y_orig_np)})')
+    axes[0].set_xlabel('Age')
+    axes[0].set_ylabel('Count')
+
+    # Oversampled distribution
+    axes[1].hist(y_over_np, bins=bin_edges, edgecolor='black', alpha=0.7, color='orange')
+    axes[1].set_title(f'Oversampled Distribution (N={len(y_over_np)}, {len(y_over_np)/len(y_orig_np):.1f}x)')
+    axes[1].set_xlabel('Age')
+    axes[1].set_ylabel('Count')
+
+    plt.tight_layout()
+    plt.show()
+
+
 # ==============================================================================
 # Loss Function
 # ==============================================================================
@@ -177,6 +263,12 @@ class GaussianNLLLoss_ME(nn.Module):
        # plt.show()
 
         return nll.mean()
+
+
+class MSELossWrapper(nn.Module):
+    """MSE loss that ignores sigma_pred for compatibility with training loop."""
+    def forward(self, y_pred, y_true, sigma_pred=None):
+        return torch.mean((y_true - y_pred) ** 2)
 
 
 def sanitize_batch(y_pred, sigma_pred, clip_sigma=(1e-7, 100.0), clip_pred=(-1000.0, 1000.0)):
@@ -316,13 +408,13 @@ def Run_Single_Epoch(model, train_loader, optimizer, loss_fn, epoch_loss=0.0,
     from datetime import datetime
 
     if verbose>2:
-        print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
     elif verbose>1:
         if epoch%10==0:
-            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
     elif verbose>0:
         if epoch%10==0:
-            print(f"[{datetime.now().strftime("%H:%M:%S")}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [EPOCH START] Epoch {epoch}, Total batches: {len(train_loader)}", flush=True)
 
     for track, batch in enumerate(train_loader, 1):
         if use_periodogram:
@@ -412,15 +504,28 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     # Create index tensor for tracking original sample indices (for gradient debug output)
     indices = torch.arange(len(X_train))
 
-    if use_periodogram:
-        train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
-    else:
-        train_dataset = TensorDataset(X_train, y_train, indices)
+    # Check if manual oversampling is requested for uniform age distribution
+    if params.get('oversample_uniform', False):
+        n_bins = params.get('oversample_bins', 20)
+        X_train_os, Period_train_os, y_train_os, indices_os = oversample_to_uniform(
+            X_train, Period_train, y_train, indices, n_bins=n_bins
+        )
 
-    # Configure DataLoader using settings from pipeline_config
-    # GPU: pin_memory=True for faster host->GPU transfer
-    # CPU: pin_memory=False
-    # num_workers from config (0 on WSL due to multiprocessing issues)
+        # Debug: plot original vs oversampled distribution
+        if verbose > 0:
+            plot_oversample_distribution(y_train, y_train_os, n_bins=n_bins)
+
+        if use_periodogram:
+            train_dataset = TensorDataset(X_train_os, Period_train_os, y_train_os, indices_os)
+        else:
+            train_dataset = TensorDataset(X_train_os, y_train_os, indices_os)
+    else:
+        if use_periodogram:
+            train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
+        else:
+            train_dataset = TensorDataset(X_train, y_train, indices)
+
+    # DataLoader with regular shuffle (oversampling already done if requested)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -430,7 +535,10 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     )
 
     # Define Loss Fcn and Optimizer
-    loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
+    if params.get('learn_sigma', True):
+        loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
+    else:
+        loss_fn = MSELossWrapper()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # Best model tracking (only if requested)
@@ -530,11 +638,11 @@ def log_model_progress(log, model, train_data, valid_data):
 
         #print(np.shape(y_true), np.shape(y_pred), np.shape(sigma_pred), np.shape(data[0]), np.shape(data[1]))
         err, sigma, tot = Loss_Components(y_true, y_pred, sigma_pred)
-        log[label+"errLoss"].append(err)
-        log[label+"sigmaLoss"].append(sigma)
-        log[label+"Loss"].append(tot)
-        log[label+"MAE" ].append(mae(y_true, y_pred))
-        log[label+"RMSE"].append(rmse(y_true, y_pred))
+        log[label+"errLoss"].append(err.item())
+        log[label+"sigmaLoss"].append(sigma.item())
+        log[label+"Loss"].append(tot.item())
+        log[label+"MAE" ].append(mae(y_true, y_pred).item())
+        log[label+"RMSE"].append(rmse(y_true, y_pred).item())
         log[label+"median_sigma"].append(torch.median(sigma_pred).item())
         log[label+"mean_sigma"].append(torch.mean(sigma_pred).item())
         log[label+"Coverage68"].append(coverage(y_true, y_pred, sigma_pred, num_sigma=1.0))

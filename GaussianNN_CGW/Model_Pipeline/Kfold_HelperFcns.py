@@ -140,6 +140,7 @@ def kfold_cross_validation(
         single_run_log[fold_id]['model'] = model
         single_run_log[fold_id]['scaler'] = scaler
         single_run_log[fold_id]['y_mean'] = y_mean
+        single_run_log[fold_id]['mean_peak_strength'] = mean_peak_strength
 
         fold_time = time.time() - fold_start
         total_elapsed = time.time() - kfold_start

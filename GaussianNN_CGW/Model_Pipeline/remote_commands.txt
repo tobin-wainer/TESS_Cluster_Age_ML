@@ -66,3 +66,12 @@ rsync -avz ./TempFiles/ModelGridLogs/ --rsync-path="wsl rsync" cgw35@desktop-win
 
 # Dry run (preview what would be synced, doesn't actually copy)
 rsync -avzn --rsync-path="wsl rsync" cgw35@desktop-win:~/projects/TESS_Cluster_Age_ML/GaussianNN_CGW/Model_Pipeline/TempFiles/ModelGridLogs/ ./TempFiles/ModelGridLogs/
+
+
+# ---- in case wsl port forward doesnt work --- %
+netsh interface portproxy delete v4tov4 listenport=2222 listenaddress=0.0.0.0
+netsh interface portproxy add v4tov4 listenport=2222 listenaddress=0.0.0.0 connectport=22 connectaddress=PASTE_IP_HERE
+netsh interface portproxy show v4tov4
+
+
+
