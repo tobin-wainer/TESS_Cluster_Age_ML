@@ -1,6 +1,5 @@
 *.pkl
 *.pt
-*.fits
 *.png
 .ipynb_checkpoints/
 *.ipynb_checkpoints*
