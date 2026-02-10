@@ -469,6 +469,7 @@ def plot_2d_statistics(
     all_runs_log,
     x_param,
     y_param,
+    fix_params=None,
     log_metrics=None,
     fold_agg='median',
     epoch_select='best',
@@ -486,6 +487,10 @@ def plot_2d_statistics(
         Top-level log dict: {model_name: {run_id: run_data}}.
     x_param, y_param : str
         Hyperparameter names for the x and y axes.
+    fix_params : dict or None
+        Pin extra hyperparameters to specific values, e.g.
+        ``{'Optimizer': 'Adam'}``. Runs whose params don't match
+        are skipped. Default is None (no filtering).
     log_metrics : list of str or None
         Training log keys to plot (e.g. ['valid_MAE', 'valid_RMSE']).
         Defaults to a standard set of validation metrics.
@@ -563,8 +568,10 @@ def plot_2d_statistics(
 
         scaled_figsize = (figsize[0], figsize[1] / 3 * nrows)
         fig, axes = plt.subplots(nrows, ncols, figsize=scaled_figsize, squeeze=False)
-        fig.suptitle(f"{model_name}: {x_param} vs {y_param} ({fold_agg}, epoch={epoch_select})",
-                     fontsize=14, y=1.02)
+        title = f"{model_name}: {x_param} vs {y_param} ({fold_agg}, epoch={epoch_select})"
+        if fix_params:
+            title += f" | fixed: {fix_params}"
+        fig.suptitle(title, fontsize=14, y=1.02)
 
         for idx, metric_key in enumerate(extended_metrics):
             row, col = divmod(idx, ncols)
@@ -581,6 +588,16 @@ def plot_2d_statistics(
                 base_metric = metric_key
 
             for run in runs.values():
+                # Skip runs that don't match fixed parameter values
+                if fix_params is not None:
+                    skip = False
+                    for fp_key, fp_val in fix_params.items():
+                        if run["params"].get(fp_key) != fp_val:
+                            skip = True
+                            break
+                    if skip:
+                        continue
+
                 metric_folds = _get_kfold_array(run, base_metric)
                 if metric_folds is None:
                     continue
