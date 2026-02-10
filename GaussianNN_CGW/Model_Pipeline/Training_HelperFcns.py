@@ -539,7 +539,22 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         loss_fn = GaussianNLLLoss_ME(debug=False, factor=loss_factor)
     else:
         loss_fn = MSELossWrapper()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer_name = params.get('Optimizer', 'Adam')
+    if optimizer_name == 'AdamW':
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name == 'Adam':
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}. Choose 'Adam' or 'AdamW'.")
+
+    # Learning rate warmup scheduler
+    warmup_epochs = int(params.get('WarmUp_Epochs', 0))
+    if warmup_epochs > 0:
+        scheduler = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_epochs
+        )
+    else:
+        scheduler = None
 
     # Best model tracking (only if requested)
     if save_best_checkpoint:
@@ -563,6 +578,10 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
                                             device=device, cluster_names=cluster_names, verbose=verbose)
         log["epoch"].append(epoch)
         log["mean_batch_loss"].append(epoch_loss)
+
+        # Step LR warmup scheduler
+        if scheduler is not None:
+            scheduler.step()
 
         ## LOG MODEL PROGRESS ##
         # Use GPU copies for evaluation (created once at start)
