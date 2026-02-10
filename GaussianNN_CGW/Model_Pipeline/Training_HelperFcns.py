@@ -179,6 +179,42 @@ def oversample_to_uniform(X, period, y, indices, n_bins=20):
     return X_over, period_over, y_over, indices_over
 
 
+def plot_oversample_distribution(y_original, y_oversampled, n_bins=20):
+    """
+    Plot histogram comparing original vs oversampled age distributions.
+
+    Parameters:
+    -----------
+    y_original : torch.Tensor - Original target values
+    y_oversampled : torch.Tensor - Oversampled target values
+    n_bins : int - Number of bins for histogram
+    """
+    y_orig_np = y_original.cpu().numpy().flatten()
+    y_over_np = y_oversampled.cpu().numpy().flatten()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Use same bin edges for both histograms
+    bin_edges = np.linspace(min(y_orig_np.min(), y_over_np.min()),
+                            max(y_orig_np.max(), y_over_np.max()),
+                            n_bins * 2)
+
+    # Original distribution
+    axes[0].hist(y_orig_np, bins=bin_edges, edgecolor='black', alpha=0.7)
+    axes[0].set_title(f'Original Distribution (N={len(y_orig_np)})')
+    axes[0].set_xlabel('Age')
+    axes[0].set_ylabel('Count')
+
+    # Oversampled distribution
+    axes[1].hist(y_over_np, bins=bin_edges, edgecolor='black', alpha=0.7, color='orange')
+    axes[1].set_title(f'Oversampled Distribution (N={len(y_over_np)}, {len(y_over_np)/len(y_orig_np):.1f}x)')
+    axes[1].set_xlabel('Age')
+    axes[1].set_ylabel('Count')
+
+    plt.tight_layout()
+    plt.show()
+
+
 # ==============================================================================
 # Loss Function
 # ==============================================================================
@@ -474,6 +510,10 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
         X_train_os, Period_train_os, y_train_os, indices_os = oversample_to_uniform(
             X_train, Period_train, y_train, indices, n_bins=n_bins
         )
+
+        # Debug: plot original vs oversampled distribution
+        if verbose > 0:
+            plot_oversample_distribution(y_train, y_train_os, n_bins=n_bins)
 
         if use_periodogram:
             train_dataset = TensorDataset(X_train_os, Period_train_os, y_train_os, indices_os)

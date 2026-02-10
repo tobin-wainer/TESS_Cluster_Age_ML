@@ -474,7 +474,7 @@ def plot_2d_statistics(
     epoch_select='best',
     lam=0.5,
     figsize=(16, 12),
-    ncols=3,
+    ncols=2,
 ):
     """Plot 2D heatmaps of training-log metrics aggregated across k-folds.
 
@@ -494,7 +494,8 @@ def plot_2d_statistics(
         Works with n_folds=1 (single fold just returns that fold's value).
     epoch_select : str
         'best' selects the epoch minimising mean_loss + lam*std_loss across
-        folds; 'final' uses the last epoch.
+        folds; 'best_minmax' minimises mean + lam*(std + spread) where
+        spread = max - min across folds; 'final' uses the last epoch.
     lam : float
         Stability penalty weight for best-epoch selection.
     figsize : tuple
@@ -504,9 +505,10 @@ def plot_2d_statistics(
     """
     if log_metrics is None:
         log_metrics = [
-            'valid_MAE', 'valid_RMSE', 'valid_Loss',
-            'valid_median_sigma', 'valid_Coverage68',
-            'valid_Coverage95', 'valid_CRPS',
+            'valid_Loss',
+            'valid_MAE', 'valid_RMSE',
+            'valid_median_sigma',
+            'valid_Coverage68', 'valid_Coverage95', 'valid_CRPS',
         ]
 
     agg_funcs = {
@@ -542,32 +544,57 @@ def plot_2d_statistics(
         x_map = {v: i for i, v in enumerate(x_vals)}
         y_map = {v: i for i, v in enumerate(y_vals)}
 
+        # Extend metrics to include loss variability plots
+        extended_metrics = []
+        for m in log_metrics:
+            if m == 'valid_Loss':
+                extended_metrics.append('best_epoch')
+                extended_metrics.append('valid_Loss_mean')
+                extended_metrics.append('valid_Loss_median')
+                extended_metrics.append('valid_Loss_std')
+                extended_metrics.append('valid_Loss_spread')
+                extended_metrics.append('valid_Loss_select_metric')
+            else:
+                extended_metrics.append(m)
+
         # Calculate subplot grid dimensions
-        n_metrics = len(log_metrics)
+        n_metrics = len(extended_metrics)
         nrows = int(np.ceil(n_metrics / ncols))
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        scaled_figsize = (figsize[0], figsize[1] / 3 * nrows)
+        fig, axes = plt.subplots(nrows, ncols, figsize=scaled_figsize, squeeze=False)
         fig.suptitle(f"{model_name}: {x_param} vs {y_param} ({fold_agg}, epoch={epoch_select})",
                      fontsize=14, y=1.02)
 
-        for idx, metric_key in enumerate(log_metrics):
+        for idx, metric_key in enumerate(extended_metrics):
             row, col = divmod(idx, ncols)
             ax = axes[row, col]
 
             Z = np.full((len(y_vals), len(x_vals)), np.nan)
 
+            # Determine base metric for data extraction
+            if metric_key in ['valid_Loss_mean', 'valid_Loss_median',
+                              'valid_Loss_std', 'valid_Loss_spread',
+                              'valid_Loss_select_metric', 'best_epoch']:
+                base_metric = 'valid_Loss'
+            else:
+                base_metric = metric_key
+
             for run in runs.values():
-                metric_folds = _get_kfold_array(run, metric_key)
+                metric_folds = _get_kfold_array(run, base_metric)
                 if metric_folds is None:
                     continue
 
-                if epoch_select == 'best':
+                if epoch_select in ['best', 'best_minmax']:
                     loss_folds = _get_kfold_array(run, 'valid_Loss')
                     if loss_folds is None:
                         continue
                     mean_loss = np.nanmean(loss_folds, axis=0)
                     std_loss = np.nanstd(loss_folds, axis=0)
                     combined = mean_loss + lam * std_loss
+                    if epoch_select == 'best_minmax':
+                        spread = np.nanmax(loss_folds, axis=0) - np.nanmin(loss_folds, axis=0)
+                        combined = combined + lam * spread
                     if np.all(np.isnan(combined)):
                         continue
                     epoch_idx = int(np.nanargmin(combined))
@@ -579,36 +606,83 @@ def plot_2d_statistics(
                     epoch_idx = metric_folds.shape[1] - 1
 
                 fold_values = metric_folds[:, epoch_idx]
-                agg_val = float(agg_fn(fold_values))
+
+                # Compute value based on metric type
+                if metric_key == 'valid_Loss_mean':
+                    agg_val = float(np.nanmean(fold_values))
+                elif metric_key == 'valid_Loss_median':
+                    agg_val = float(np.nanmedian(fold_values))
+                elif metric_key == 'valid_Loss_std':
+                    agg_val = float(np.nanstd(fold_values))
+                elif metric_key == 'valid_Loss_spread':
+                    agg_val = float(np.nanmax(fold_values) - np.nanmin(fold_values))
+                elif metric_key == 'valid_Loss_select_metric':
+                    loss_folds = _get_kfold_array(run, 'valid_Loss')
+                    mean_l = np.nanmean(loss_folds[:, epoch_idx])
+                    std_l = np.nanstd(loss_folds[:, epoch_idx])
+                    if epoch_select == 'best_minmax':
+                        spread_l = np.nanmax(loss_folds[:, epoch_idx]) - np.nanmin(loss_folds[:, epoch_idx])
+                        agg_val = float(mean_l + lam * std_l + lam * spread_l)
+                    else:
+                        agg_val = float(mean_l + lam * std_l)
+                elif metric_key == 'best_epoch':
+                    agg_val = float(epoch_idx)
+                else:
+                    agg_val = float(agg_fn(fold_values))
 
                 x_i = x_map[run["params"][x_param]]
                 y_i = y_map[run["params"][y_param]]
                 Z[y_i, x_i] = agg_val
 
-            # Transform coverage metrics to show deviation from target
+            # Transform coverage metrics to show deviation from target (in %)
             display_title = metric_key
             if metric_key == 'valid_Coverage68':
-                Z = Z - 0.68
-                display_title = 'valid_Coverage68 - 0.68'
+                Z = (Z - 0.68) * 100
+                display_title = 'valid_Coverage68 - 68%'
             elif metric_key == 'valid_Coverage95':
-                Z = Z - 0.95
-                display_title = 'valid_Coverage95 - 0.95'
+                Z = (Z - 0.95) * 100
+                display_title = 'valid_Coverage95 - 95%'
+            elif metric_key == 'valid_Loss_select_metric':
+                if epoch_select == 'best':
+                    display_title = f"Selection: mean + {lam}*std"
+                elif epoch_select == 'best_minmax':
+                    display_title = f"Selection: mean + {lam}*(std + spread)"
+                else:
+                    display_title = "Selection metric (final epoch)"
 
             # Determine color normalization based on metric type
             valid_vals = Z[~np.isnan(Z)]
             if valid_vals.size == 0:
                 norm = None
                 cmap = 'viridis'
-            elif metric_key == 'valid_Loss':
+            elif metric_key in ['valid_Loss_mean', 'valid_Loss_median',
+                                'valid_Loss_select_metric']:
                 # SymLog for loss (can go negative)
                 abs_max = max(abs(np.nanmin(valid_vals)), abs(np.nanmax(valid_vals)), 1e-3)
                 norm = mcolors.SymLogNorm(linthresh=0.1, linscale=1, vmin=-abs_max, vmax=abs_max)
                 cmap = 'viridis'
+            elif metric_key == 'best_epoch':
+                norm = mcolors.Normalize(
+                    vmin=np.nanmin(valid_vals),
+                    vmax=np.nanmax(valid_vals),
+                )
+                cmap = 'viridis'
+            elif metric_key in ['valid_Loss_std', 'valid_Loss_spread']:
+                # Positive values only, use LogNorm with plasma colormap
+                positive = valid_vals[valid_vals > 0]
+                if positive.size == 0:
+                    norm = None
+                else:
+                    norm = mcolors.LogNorm(
+                        vmin=np.nanmin(positive),
+                        vmax=np.nanmax(positive),
+                    )
+                cmap = 'plasma'
             elif metric_key in ['valid_Coverage68', 'valid_Coverage95']:
                 # SymLog for coverage deviation (centered at 0)
                 abs_max = max(abs(np.nanmin(valid_vals)), abs(np.nanmax(valid_vals)), 1e-3)
-                abs_max = min(abs_max, 1.0)  # Cap at 1
-                norm = mcolors.SymLogNorm(linthresh=0.01, linscale=1, vmin=-abs_max, vmax=abs_max)
+                abs_max = min(abs_max, 100.0)  # Cap at 100%
+                norm = mcolors.SymLogNorm(linthresh=1, linscale=1, vmin=-abs_max, vmax=abs_max)
                 cmap = 'RdBu_r'
             elif metric_key in ['valid_MAE', 'valid_RMSE', 'valid_median_sigma', 'valid_CRPS']:
                 # Cap max at 10 for these metrics
@@ -661,7 +735,13 @@ def plot_2d_statistics(
                                 text_color = "black"
                         else:
                             text_color = "black"
-                        ax.text(xi, yi, f"{val:.2g}", ha="center", va="center",
+                        if metric_key in ['valid_Coverage68', 'valid_Coverage95']:
+                            fmt_str = f"{val:.1f}%"
+                        elif metric_key == 'best_epoch':
+                            fmt_str = f"{int(val)}"
+                        else:
+                            fmt_str = f"{val:.2g}"
+                        ax.text(xi, yi, fmt_str, ha="center", va="center",
                                 color=text_color, fontsize=7)
 
             ax.set_xlabel(x_param, fontsize=9)
