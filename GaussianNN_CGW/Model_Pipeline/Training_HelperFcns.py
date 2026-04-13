@@ -179,37 +179,150 @@ def oversample_to_uniform(X, period, y, indices, n_bins=20):
     return X_over, period_over, y_over, indices_over
 
 
-def plot_oversample_distribution(y_original, y_oversampled, n_bins=20):
+def undersample_to_uniform(X, period, y, indices, n_bins=20, seed=None):
     """
-    Plot histogram comparing original vs oversampled age distributions.
+    Undersample training data to create a more uniform target distribution.
+
+    Randomly drops samples from dense bins so each bin has roughly equal
+    representation. Uses the minimum non-empty bin count as the target.
+
+    Parameters:
+    -----------
+    X : torch.Tensor - Summary statistics (N, features)
+    period : torch.Tensor or None - Periodogram data (N, freqs)
+    y : torch.Tensor - Target values (N, 1)
+    indices : torch.Tensor - Original sample indices for tracking
+    n_bins : int - Number of bins for computing distribution
+    seed : int or None - Random seed for reproducibility
+
+    Returns:
+    --------
+    X_under, period_under, y_under, indices_under : Undersampled tensors
+    """
+    rng = np.random.default_rng(seed)
+    y_np = y.cpu().numpy().flatten()
+
+    # Compute histogram to get bin counts
+    hist, bin_edges = np.histogram(y_np, bins=n_bins)
+
+    # Find which bin each sample belongs to
+    bin_indices = np.digitize(y_np, bin_edges[:-1]) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+    # Target count: smallest non-empty bin
+    target_count = hist[hist > 0].min()
+
+    # For each non-empty bin, randomly select target_count samples
+    selected = []
+    for b in range(n_bins):
+        bin_mask = np.where(bin_indices == b)[0]
+        if len(bin_mask) == 0:
+            continue
+        if len(bin_mask) <= target_count:
+            selected.append(bin_mask)
+        else:
+            selected.append(rng.choice(bin_mask, size=target_count, replace=False))
+
+    selected = np.concatenate(selected)
+    selected = torch.tensor(selected, dtype=torch.long)
+
+    X_under = X[selected]
+    y_under = y[selected]
+    indices_under = indices[selected]
+
+    if period is not None:
+        period_under = period[selected]
+    else:
+        period_under = None
+
+    return X_under, period_under, y_under, indices_under
+
+
+def plot_oversample_distribution(y_original, y_resampled, n_bins=20,
+                                 cluster_names_original=None,
+                                 cluster_names_resampled=None,
+                                 indices_resampled=None,
+                                 label_resampled='Oversampled'):
+    """
+    Plot histogram comparing original vs resampled age distributions.
+
+    When cluster_names are provided, bars are stacked and colored by cluster.
+    Falls back to single-color histograms when cluster_names are None.
 
     Parameters:
     -----------
     y_original : torch.Tensor - Original target values
-    y_oversampled : torch.Tensor - Oversampled target values
+    y_resampled : torch.Tensor - Resampled target values
     n_bins : int - Number of bins for histogram
+    cluster_names_original : array-like or None - Cluster name per original sample
+    cluster_names_resampled : array-like or None - Full cluster name array (indexed by indices_resampled)
+    indices_resampled : torch.Tensor or None - Indices into cluster_names_resampled for each resampled sample
+    label_resampled : str - Label for right panel title (e.g. 'Oversampled' or 'Undersampled')
     """
     y_orig_np = y_original.cpu().numpy().flatten()
-    y_over_np = y_oversampled.cpu().numpy().flatten()
+    y_resamp_np = y_resampled.cpu().numpy().flatten()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    ratio = len(y_resamp_np) / len(y_orig_np)
 
-    # Use same bin edges for both histograms
-    bin_edges = np.linspace(min(y_orig_np.min(), y_over_np.min()),
-                            max(y_orig_np.max(), y_over_np.max()),
-                            n_bins * 2)
+    # Row 0: coarse bins (n_bins, matches the under/oversampling cut)
+    # Row 1: fine bins (n_bins * 10)
+    y_min = min(y_orig_np.min(), y_resamp_np.min())
+    y_max = max(y_orig_np.max(), y_resamp_np.max())
+    bin_edges_coarse = np.linspace(y_min, y_max, n_bins + 1)
+    bin_edges_fine = np.linspace(y_min, y_max, n_bins * 10 + 1)
 
-    # Original distribution
-    axes[0].hist(y_orig_np, bins=bin_edges, edgecolor='black', alpha=0.7)
-    axes[0].set_title(f'Original Distribution (N={len(y_orig_np)})')
-    axes[0].set_xlabel('Age')
-    axes[0].set_ylabel('Count')
+    # Precompute cluster data if available
+    if cluster_names_original is not None:
+        cluster_names_orig_arr = np.asarray(cluster_names_original)
+        unique_clusters = np.unique(cluster_names_orig_arr)
+        show_legend = len(unique_clusters) <= 20
+        ages_by_cluster_orig = [y_orig_np[cluster_names_orig_arr == c] for c in unique_clusters]
 
-    # Oversampled distribution
-    axes[1].hist(y_over_np, bins=bin_edges, edgecolor='black', alpha=0.7, color='orange')
-    axes[1].set_title(f'Oversampled Distribution (N={len(y_over_np)}, {len(y_over_np)/len(y_orig_np):.1f}x)')
-    axes[1].set_xlabel('Age')
-    axes[1].set_ylabel('Count')
+        if indices_resampled is not None and cluster_names_resampled is not None:
+            cluster_names_resamp_arr = np.asarray(cluster_names_resampled)
+            idx = indices_resampled.cpu().numpy().flatten()
+            resamp_clusters = cluster_names_resamp_arr[idx]
+            ages_by_cluster_resamp = [y_resamp_np[resamp_clusters == c]
+                                      for c in unique_clusters
+                                      if np.any(resamp_clusters == c)]
+            labels_resamp = [c for c in unique_clusters if np.any(resamp_clusters == c)]
+        else:
+            resamp_clusters = None
+
+    for row, (bin_edges, bin_label) in enumerate([(bin_edges_coarse, f'{n_bins} bins'),
+                                                   (bin_edges_fine, f'{n_bins*10} bins')]):
+        ax_orig = axes[row, 0]
+        ax_resamp = axes[row, 1]
+
+        if cluster_names_original is not None:
+            ax_orig.hist(ages_by_cluster_orig, bins=bin_edges, stacked=True,
+                         edgecolor='black', alpha=0.7,
+                         label=unique_clusters if show_legend else None)
+
+            if resamp_clusters is not None:
+                ax_resamp.hist(ages_by_cluster_resamp, bins=bin_edges, stacked=True,
+                               edgecolor='black', alpha=0.7,
+                               label=labels_resamp if show_legend else None)
+            else:
+                ax_resamp.hist(y_resamp_np, bins=bin_edges, edgecolor='black',
+                               alpha=0.7, color='orange')
+
+            if show_legend and row == 0:
+                for ax in [ax_orig, ax_resamp]:
+                    ax.legend(fontsize=6, ncol=2)
+        else:
+            ax_orig.hist(y_orig_np, bins=bin_edges, edgecolor='black', alpha=0.7)
+            ax_resamp.hist(y_resamp_np, bins=bin_edges, edgecolor='black',
+                           alpha=0.7, color='orange')
+
+        ax_orig.set_title(f'Original (N={len(y_orig_np)}) — {bin_label}')
+        ax_orig.set_xlabel('Age')
+        ax_orig.set_ylabel('Count')
+
+        ax_resamp.set_title(f'{label_resampled} (N={len(y_resamp_np)}, {ratio:.1f}x) — {bin_label}')
+        ax_resamp.set_xlabel('Age')
+        ax_resamp.set_ylabel('Count')
 
     plt.tight_layout()
     plt.show()
@@ -504,7 +617,8 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
     # Create index tensor for tracking original sample indices (for gradient debug output)
     indices = torch.arange(len(X_train))
 
-    # Check if manual oversampling is requested for uniform age distribution
+    # Check if manual oversampling or undersampling is requested for uniform age distribution
+    # Oversample and undersample are mutually exclusive (oversample takes precedence)
     if params.get('oversample_uniform', False):
         n_bins = params.get('oversample_bins', 20)
         X_train_os, Period_train_os, y_train_os, indices_os = oversample_to_uniform(
@@ -513,12 +627,37 @@ def Train_Model(model, training_data, validation_data, params, log, save_best_ch
 
         # Debug: plot original vs oversampled distribution
         if verbose > 0:
-            plot_oversample_distribution(y_train, y_train_os, n_bins=n_bins)
+            plot_oversample_distribution(y_train, y_train_os, n_bins=n_bins,
+                                         cluster_names_original=cluster_names,
+                                         cluster_names_resampled=cluster_names,
+                                         indices_resampled=indices_os,
+                                         label_resampled='Oversampled')
 
         if use_periodogram:
             train_dataset = TensorDataset(X_train_os, Period_train_os, y_train_os, indices_os)
         else:
             train_dataset = TensorDataset(X_train_os, y_train_os, indices_os)
+
+    elif params.get('undersample_uniform', False):
+        n_bins = params.get('undersample_bins', 20)
+        seed = params.get('undersample_seed', None)
+        X_train_us, Period_train_us, y_train_us, indices_us = undersample_to_uniform(
+            X_train, Period_train, y_train, indices, n_bins=n_bins, seed=seed
+        )
+
+        # Debug: plot original vs undersampled distribution
+        if verbose > 0:
+            plot_oversample_distribution(y_train, y_train_us, n_bins=n_bins,
+                                         cluster_names_original=cluster_names,
+                                         cluster_names_resampled=cluster_names,
+                                         indices_resampled=indices_us,
+                                         label_resampled='Undersampled')
+
+        if use_periodogram:
+            train_dataset = TensorDataset(X_train_us, Period_train_us, y_train_us, indices_us)
+        else:
+            train_dataset = TensorDataset(X_train_us, y_train_us, indices_us)
+
     else:
         if use_periodogram:
             train_dataset = TensorDataset(X_train, Period_train, y_train, indices)
